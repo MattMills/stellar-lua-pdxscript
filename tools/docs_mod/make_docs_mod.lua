@@ -1388,6 +1388,21 @@ E.tooltip = { text = "tooltip = { log = \"sdc\" }",
         .. "scripted action field" }
 T.ship_size_cost_resource_percent = { skip = "the game wants a block where the docs give "
     .. "`= <resource_key>`; vanilla uses it only as a complex_trigger_modifier trigger" }
+E.start_colony = { text = "start_colony = { owner = from species = from }",
+    note = "vanilla form; with the docs' `ethos = random` the game's reader loses its place "
+        .. "(error.log: the next effect is \"Unexpected token\")" }
+T.count_ship_size_in_system = { skip = "the game refuses the docs' `count` (error.log: "
+    .. "\"Unexpected token: count\"), and vanilla does not use it" }
+T.governors_skill_in_system = { skip = "the game wants a block (error.log) and refuses the docs' "
+    .. "example in it (has_base_skill > 2); vanilla does not use it" }
+T.is_system_connected_to_relay_network = { text = "is_system_connected_to_relay_network = yes",
+    note = "a yes/no trigger (error.log: \"Expected: yes/no\"); the docs give a target" }
+E.spawn_psionic_aura = { text = "spawn_psionic_aura = { owner = from type = exiled_aura "
+    .. "update_type = no }", note = "vanilla form (common/patrons/psionic_auras); the game refuses "
+        .. "the docs' `country`" }
+E.create_bypass = { text = "create_bypass = { owner = from type = entropy_wormhole }",
+    note = "the game refuses the docs' `effect = { ... }` (error.log: \"Unexpected token: "
+        .. "effect\"); vanilla does not use it" }
 T.nb_pop_exact_species = { skip = "the game wants `value = { ... }` (error.log), and neither the "
     .. "docs nor vanilla say what goes in it" }
 T.subject_can_diplomacy = { text = "subject_can_diplomacy = yes",
