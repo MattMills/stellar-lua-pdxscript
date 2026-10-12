@@ -1363,11 +1363,44 @@ E.set_update_modifiers_batch = { text = "set_update_modifiers_batch = begin\n"
 E.set_country_code_flags = { text = "set_country_code_flags = { custom_name = yes "
     .. "initialized = no }", note = "flags from the example's list" }
 E.rename_species = { text = "rename_species = { name = random }" }
-E.owned_fleet_list_tooltip = { text = "owned_fleet_list_tooltip = { limit = { always = yes } "
-    .. "divider_tooltip = sdc_text }" }
+-- the docs' forms that Stellaris 4.5.2 refuses (error.log), written as vanilla writes them; a
+-- refused value can also throw the game's reader off for the rest of the file
+E.owned_fleet_list_tooltip = { text = "owned_fleet_list_tooltip = { limit = { always = yes } }",
+    note = "the game refuses divider_tooltip (\"Unhandled Entry\"), vanilla uses limit only" }
+E.refuse_covenant = { text = "refuse_covenant = { patron = end_of_the_cycle reset_attunement = yes }",
+    note = "the game wants a block, not `= <patron>` (vanilla form)" }
+E.create_ship_design = { text = "create_ship_design = { design = NAME_Brigand }",
+    note = "the game refuses ftl (\"Unexpected token\"), vanilla gives the design only" }
+T.count_used_naval_cap = { text = "count_used_naval_cap = { limit = { always = yes } value >= 6 }",
+    note = "the game wants value, not count (vanilla form)" }
+T.get_attunement_points_for = { skip = "the game wants `value = { ... }` (error.log), and neither "
+    .. "the docs (`value = <int/variable>`) nor vanilla say what goes in it" }
+T.planet_happiness_above_threshold = { skip = "the game refuses the docs' `value > 0` (error.log: "
+    .. "\"Unexpected token: value\"), and vanilla does not use it" }
+T.valid_planet_killer_target = { skip = "the game wants a block where the docs give `= <planet>`, "
+    .. "and vanilla does not use it" }
+E.stop_mission = { skip = "the game reads the docs' block as effects (mission and status become "
+    .. "scripted effect calls), and vanilla does not use it" }
+E.create_smaller_size_creature_in_fleet = { text = "create_smaller_size_creature_in_fleet = { count = 1 "
+    .. "effect = { set_ship_flag = sdc_flag } }", note = "the game wants a block, not a number (vanilla form)" }
+E.tooltip = { text = "tooltip = { log = \"sdc\" }",
+    note = "a block of effects shown, not run (vanilla events); the shortest vanilla `tooltip` is a "
+        .. "scripted action field" }
+T.ship_size_cost_resource_percent = { skip = "the game wants a block where the docs give "
+    .. "`= <resource_key>`; vanilla uses it only as a complex_trigger_modifier trigger" }
+T.nb_pop_exact_species = { skip = "the game wants `value = { ... }` (error.log), and neither the "
+    .. "docs nor vanilla say what goes in it" }
+T.subject_can_diplomacy = { text = "subject_can_diplomacy = yes",
+    note = "a yes/no trigger (error.log: \"Expected: yes/no\"); the docs give a target" }
+E.end_fleet_contract = { text = "end_fleet_contract = { initiator = this.controller reason = cancelled }",
+    note = "the game wants a block (vanilla form), not `= yes`" }
+E.set_empire_flag = { text = "set_empire_flag = { icon = { category = \"zoological\" "
+    .. "file = \"flag_zoological_1.dds\" } background = { category = \"backgrounds\" "
+    .. "file = \"00_solid.dds\" } colors = { \"black\" \"black\" \"null\" \"null\" } }",
+    note = "the empire's flag, a flag block (vanilla grand_archive/voidworms_flag); the game "
+        .. "refuses `= <flag>`" }
 E.storm_apply_aftermath_modifier = { text = "storm_apply_aftermath_modifier = { severity = "
     .. "{ modifier = MODIFIER days = 30 chance = 1 } }" }
-E.stop_mission = { text = "stop_mission = { mission = MISSION status = success }" }
 E.copy_ascension_perks_from = { text = "copy_ascension_perks_from = { target = from "
     .. "exceptions = { PERK1 PERK2 } }" }
 E.copy_traditions_from = { text = "copy_traditions_from = { target = from "
@@ -2003,6 +2036,8 @@ local function write_anchors()
             add_line(f, "\timmediate = { log = \"sdc\" }")
         else
             add_line(f, "\ttitle = " .. id .. ".name")
+            -- an event with a window needs a picture (error.log: "has no pictures")
+            add_line(f, "\tpicture = GFX_evt_alien_nature")
             add_line(f, "\tdesc = {")
             add_line(f, "\t\ttrigger = {")
             for _, use in ipairs(uses.trigger) do
