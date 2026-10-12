@@ -41,6 +41,7 @@ this directory).
 luajit tests/test_pdxscript.lua                     # 191 targeted tests (any Lua 5.1 to 5.4 too)
 luajit tools/parse_all.lua "<Stellaris dir>"        # every script file; exit code 0 = no error
 luajit tools/parse_all.lua "<Stellaris dir>" primary
+cd tools/docs_mod && luajit make_docs_mod.lua "<docs dir>" "<Stellaris dir>" "<out dir>"
 ```
 
 `parse_all` parses the primary corpus (the game's script: `common/**/*.txt`, `events/*.txt`,
@@ -48,6 +49,12 @@ luajit tools/parse_all.lua "<Stellaris dir>" primary
 and `.asset` files under `interface/` and `gfx/`, same syntax), prints counts per directory, every
 error and warning, statistics (operators, quoted and bare values, the most common keys) and runs
 the round trip (write, parse again, compare).
+
+`docs_mod/make_docs_mod.lua` reads the script documentation the game writes when it starts
+(`logs/script_documentation`) and builds a mod that uses every documented trigger, effect, scope
+link, modifier and localisation command once, where the game accepts it, with a manifest of the
+file and line of each: a corpus for checking a reader against what the game compiled. See
+[tools/docs_mod/README.md](tools/docs_mod/README.md).
 
 ## The tree
 
