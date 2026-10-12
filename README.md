@@ -51,8 +51,8 @@ the round trip (write, parse again, compare).
 
 ## The tree
 
-A block is a Lua array of entries in source order (duplicates kept), with `line` (of its `{`) and,
-for a typed block, `type`. The tree is the block of the file, with `name` and `warnings`. An entry
+A block is a Lua array of entries in source order (duplicates kept), with `line` (of its `{`),
+`last` (of the `}` that closes it) and, for a typed block, `type`. The tree is the block of the file, with `name` and `warnings`. An entry
 is one of:
 
 | entry | shape | test |
