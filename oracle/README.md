@@ -22,6 +22,27 @@ It needs LuaJIT and the Unicorn 2 emulator library (`PDXORACLE_UNICORN` = the pa
 `libunicorn.so` / `unicorn.dll` unless it is on the library path). Unicorn 2.1.1 builds with
 `cmake -DUNICORN_ARCH=x86 -DCMAKE_BUILD_TYPE=Release`.
 
+### Every build at once
+
+```
+luajit tools/oracle_builds.lua linux > linux.lst        # or pdb, labels, transfer, windows, none
+tools/oracle_runall.sh linux.lst lex/ tools/oracle_lexrun.lua 16   # a runner on every build
+tools/oracle_checkall.sh lexer lex/                     # pdxlexer against each (or: reader read/)
+tools/oracle_fuzzall.sh linux.lst fuzz/ 2000 1 16       # pdxreader fuzzed against each
+```
+
+`tools/oracle_builds.lua` lists the builds of the archive the oracle can run: executable, a name
+that starts with its version, and for a build that needs one its transfer chain. The shell scripts
+take their environment from `tools/oracle_env.sh`: `PDXORACLE_DEPS` (where unicorn and LuaJIT were
+built), `PDXORACLE_ARCHIVE` (the directory of `stellaris_backups_steam` and
+`stellaris_backups_gog`), and `PDXORACLE_LABELS` / `PDXORACLE_CORPUS` (stellar-fnmatch's labels
+of the Windows builds without a PDB), each with a default for the machine they were made on.
+
+For looking inside a build: `tools/pe_info.lua` (a Windows executable as loaded, its symbols that
+match a pattern, decoded), `tools/pe_vtable.lua`, `tools/pe_calls.lua`, `tools/oracle_crtinit.lua`
+(its C runtime started in the emulator), `tools/elf_dis.sh`, `tools/elf_initarray.lua`,
+`tools/oracle_importprofile.lua` (the imports start-up calls most).
+
 ## How it works
 
 | file | |
@@ -29,7 +50,13 @@ It needs LuaJIT and the Unicorn 2 emulator library (`PDXORACLE_UNICORN` = the pa
 | `unicorn.lua` | Unicorn through the LuaJIT FFI: memory, registers, hooks |
 | `elf.lua` | an ELF executable (x86, x86-64): segments, symbols, relocations, sections |
 | `machine.lua` | the process: the image mapped and relocated, a stub per imported function, a heap, a stack, the thread pointer and TLS; `m:call(address, ...)` runs a function of the game; static initializers (`m:static_init`), function replacement (`m:replace`), a basic block trace for errors (`m:trace`), observation hooks (`m:on_enter`, `m:coverage`) |
-| `hle.lua` | the shared libraries the game calls, in Lua: libc, libm, operator new/delete, the C++ runtime, pthreads (one thread), tbb's allocator. The hottest (memcpy, memcmp, strlen, tolower ...) are x86 code that runs inside the emulator |
+| `hle.lua` | the shared libraries the game calls, in Lua: libc, libm, operator new/delete, the C++ runtime, pthreads (one thread), tbb's allocator. The hottest (memcpy, memcmp, strlen, tolower ...) are x86 code that runs inside the emulator (its source: `tools/native/`, `assemble.sh --check`) |
+| `image.lua` | an executable of either kind: ELF, or PE with its symbols from its PDB, else labels, else a transfer |
+| `pe.lua`, `pdb.lua` | a Windows executable (PE32, PE32+): sections, imports, TLS; the public symbols of its program database (MSVC decorated names) |
+| `msvc.lua` | what a decorated name says: the qualified name, function or data, the calling convention, what an i386 function pops |
+| `labels.lua` | symbols for a Windows build without a PDB from stellar-fnmatch's labels: overloads and vtables placed by a nearby build with a PDB |
+| `transfer.lua` | symbols for a 32-bit build with neither, carried over from a build with a PDB by matching its code (not run yet) |
+| `hle_msvc.lua`, `hle_msvc_ctype.lua` | the Windows API the game calls (the C and C++ runtimes are linked into the game and run as its own code); Windows' character data, measured (`tools/measure_ctype.py` writes it) |
 | `hle_string.lua`, `hle_cowstring.lua` | libstdc++'s `std::string`, C++11 ABI (2.x, 3.x) and old copy-on-write ABI (1.x): the game's `CString` is one |
 | `hle_tree.lua` | libstdc++'s red-black tree (`std::map`) and hash table rehash policy |
 | `gamelog.lua` | the game's log (`CLogger::Log`, `CLogStream`) captured into `m.log` |
@@ -86,8 +113,14 @@ logic), 76 cases behave the same in every build, and 24 differ:
 | `;` starts a comment; `(` `)` `,` are tokens | all |
 | a backslash before anything but `"` or `\` in a string stays, with the warning "Backslash followed by neither quote nor backslash, ..." | all |
 
-Between 2.5.0 and 3.12.5 there is no Linux build with symbols. The Windows builds of those
-versions (with PDBs, or labelled by stellar-fnmatch) are the next to add.
+Between 1.2.5 and 2.3.0, and between 2.5.0 and 3.12.5, there is no Linux build with symbols. The
+Windows builds of those versions (126 with a PDB, 127 labelled by stellar-fnmatch; all but one,
+whose PDB cannot be read, run) place the changes closer: `>=` / `<=` as one token and the NUL
+handling of 2.x come between 1.2.5 and 2.1.4.4; `!` and `!=` as tokens (so `[[!P]`, and `NOT` /
+`not` with the id of `!`) between 2.8.1.2 and 3.0.1. The profiles of `pdxlexer` and `pdxreader`
+still change where the Linux builds put it, so the versions in those gaps differ from them
+(`tools/oracle_checkall.sh`). The 32-bit Steam builds 1.3 to 2.1 have neither a PDB nor labels;
+`transfer.lua` is for them.
 
 ## pdxlexer: GetTok of every version, checked
 
