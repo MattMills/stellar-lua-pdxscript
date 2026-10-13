@@ -197,6 +197,9 @@ function Machine:crt_init()
         end
     end
     local a, z = self:has(u .. "__xi_a"), self:has(u .. "__xi_z")
+    if not (a and z) then
+        a, z = self:find_initterm_e()
+    end
     if a and z then
         for p = a, z - self.word, self.word do
             local fn = self:ptr(p)
@@ -207,6 +210,49 @@ function Machine:crt_init()
     end
     self.crt_init_results = results
     return results
+end
+
+-- __xi_a and __xi_z where they have no symbol (x86-64 builds with labels only): the two tables
+-- __scrt_common_main_seh gives _initterm_e, `lea rcx, [__xi_a]; lea rdx, [__xi_z]; call _initterm_e`
+-- (__scrt_common_main_seh found from its label, or as where WinMainCRTStartup jumps)
+function Machine:find_initterm_e()
+    if self.bits ~= 64 then return nil end
+    local initterm_e = self:has("_initterm_e")
+    if not initterm_e then return nil end
+    local function i32(s, i)
+        local v = s:byte(i) + s:byte(i + 1) * 256 + s:byte(i + 2) * 65536 + s:byte(i + 3) * 16777216
+        return v >= 2 ^ 31 and v - 2 ^ 32 or v
+    end
+    local main = self:has("__scrt_common_main_seh")
+    if not main then
+        local start = self:has("WinMainCRTStartup")
+        if not start then return nil end
+        local code = self:read(start, 32)
+        for i = 1, 28 do
+            if code:byte(i) == 0xe9 then
+                main = start + i - 1 + 5 + i32(code, i + 1)
+                break
+            end
+        end
+        if not main then return nil end
+    end
+    local code = self:read(main, 0x300)
+    for i = 1, #code - 4 do
+        if code:byte(i) == 0xe8 and main + i - 1 + 5 + i32(code, i + 1) == initterm_e then
+            local a, z
+            for j = math.max(1, i - 24), i - 7 do
+                if code:byte(j) == 0x48 and code:byte(j + 1) == 0x8d then
+                    local reg = code:byte(j + 2)
+                    local target = main + j - 1 + 7 + i32(code, j + 3)
+                    if reg == 0x0d then a = target elseif reg == 0x15 then z = target end
+                end
+            end
+            if a and z then
+                return a, z
+            end
+        end
+    end
+    return nil
 end
 
 -- m:close(): the emulator and the process's memory freed at once (a machine holds hundreds of MB;

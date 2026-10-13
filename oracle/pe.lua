@@ -182,11 +182,17 @@ function pe.parse(data, path, options)
         local n = math.floor(psize / 12)
         local begins = ffi.new("uint32_t[?]", n)
         local ends = ffi.new("uint32_t[?]", n)
+        local chained = ffi.new("uint8_t[?]", n)
         for i = 0, n - 1 do
             begins[i] = u32(o + 12 * i)
             ends[i] = u32(o + 12 * i + 4)
+            -- a part of a function (UNW_FLAG_CHAININFO in its unwind information) is not a function
+            local uo = offset_of(u32(o + 12 * i + 8))
+            if uo and bit.band(bit.rshift(p[uo], 3), 4) ~= 0 then
+                chained[i] = 1
+            end
         end
-        image.pdata = { n = n, begins = begins, ends = ends }
+        image.pdata = { n = n, begins = begins, ends = ends, chained = chained }
     end
 
     -- the CodeView record of the debug directory: the PDB's GUID and age
@@ -231,6 +237,31 @@ function Image:function_size(rva)
     return nil
 end
 
+-- the index of the function that starts at rva in the order of .pdata, and the function at an index
+function Image:function_index(rva)
+    local pd = self.pdata
+    if not pd then return nil end
+    local lo, hi = 0, pd.n - 1
+    while lo <= hi do
+        local mid = math.floor((lo + hi) / 2)
+        local b = pd.begins[mid]
+        if b == rva then
+            return mid
+        elseif b < rva then
+            lo = mid + 1
+        else
+            hi = mid - 1
+        end
+    end
+    return nil
+end
+
+function Image:function_at_index(i)
+    local pd = self.pdata
+    if not pd or i < 0 or i >= pd.n or pd.chained[i] ~= 0 then return nil end
+    return pd.begins[i], pd.ends[i] - pd.begins[i]
+end
+
 function Image:add_symbol(name, rva, func, size)
     local s = self.symbols[name]
     if s then return s end
@@ -252,8 +283,16 @@ function Image:load_symbols(options)
             pdb_path = candidate
         end
     end
+    local publics
     if pdb_path then
-        local publics = require("oracle.pdb").publics(pdb_path)
+        local ok, list = pcall(require("oracle.pdb").publics, pdb_path)
+        if ok then
+            publics = list
+        else
+            self.pdb_error = tostring(list)
+        end
+    end
+    if publics then
         local secs = self.section_list
         for _, s in ipairs(publics) do
             local sec = secs[s.segment]

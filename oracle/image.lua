@@ -28,6 +28,10 @@ function imagelib.load(path, options)
                 image.symbol_source = "labels"
             end
         end
+        if not image.symbol_source and not options.no_symbols then
+            error(tostring(path) .. ": no symbols (" .. (image.pdb_error and ("the PDB cannot be read: " ..
+                image.pdb_error) or "no PDB, no labels") .. ")")
+        end
         return image
     end
     error(tostring(path) .. ": neither an ELF nor a PE executable")

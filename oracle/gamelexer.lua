@@ -80,6 +80,7 @@ end
 
 local Lexer = {}
 Lexer.__index = Lexer
+gamelexer.Lexer = Lexer
 
 local function u32(s, o)
     local a, b, c, d = s:byte(o + 1, o + 4)
@@ -148,6 +149,9 @@ function gamelexer.new(m, options)
     gl:probe_lexer()
     gl:probe_file()
     gl:probe_quoted()
+    if not f.line then
+        gl:line(gl:open("").lexer)  -- finds the lexer's file pointer now, not inside a reader
+    end
     return gl
 end
 
@@ -446,6 +450,32 @@ function Lexer:snapshot(text)
     self.m:call(self.f.gettok, s.lexer)
     local token = s.token or s.lexer + 0x18
     return self.m:read(token, 0x120)
+end
+
+-- gl:line(lexer) -> the line the lexer is at: CLexer::LineNumber, or where it is inlined (Windows)
+-- the line of the lexer's file (the word of the lexer that points at the file it was made with)
+function Lexer:line(lexer)
+    local m = self.m
+    if self.f.line then
+        return m:call(self.f.line, lexer)
+    end
+    local F = self.file_layout or {}
+    if not F.line then
+        return nil
+    end
+    if not self.lexer_file then
+        local s = self:open("x")
+        for o = 0, 0x40 - m.word, m.word do
+            if m:ptr(s.lexer + o) == s.file then
+                self.lexer_file = o
+                break
+            end
+        end
+        if not self.lexer_file then
+            return nil
+        end
+    end
+    return m:u32(m:ptr(lexer + self.lexer_file) + F.line)
 end
 
 -- the token GetTok left in the lexer, and the file's state
