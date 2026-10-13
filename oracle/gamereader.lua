@@ -28,8 +28,9 @@ local NAMES = {
     persistent_read = { "_ZN11CPersistent4ReadER7CReader" },
     read_member = { "_ZN11CPersistent10ReadMemberER7CReaderi" },
     vtable = { "_ZTV11CPersistent" },
-    register_variable = { "_ZN7CReader22RegisterVariableInListER9CPdxArrayINS_15SReaderVariableEiE",
-        "_ZN7CReader16RegisterVariableEv" },
+    -- (its list is a CArray in 2.x, a CPdxArray from 3.x: a pattern)
+    register_variable = { "^_ZN7CReader22RegisterVariableInListER" },
+    register_variable_global = { "_ZN7CReader16RegisterVariableEv" },
     inline_script = { "_Z24CreateInlineScriptReaderR7CReader" },
 }
 
@@ -38,11 +39,19 @@ local SENTINEL = -0x4f52  -- an id no token has: "this field was not set by the 
 local Reader = {}
 Reader.__index = Reader
 
+-- the functions of NAMES in the image: a name is a mangled name, or a Lua pattern (starting with
+-- ^) for the first symbol that matches
 local function locate(m)
     local f = {}
     for key, names in pairs(NAMES) do
         for _, n in ipairs(names) do
-            local a = m:has(n)
+            local a
+            if n:sub(1, 1) == "^" then
+                local found = m.image:find(n)
+                a = found[1] and m.base + found[1].value
+            else
+                a = m:has(n)
+            end
             if a then
                 f[key] = a
                 break
@@ -179,14 +188,25 @@ function Reader:probe_reader()
         mm:set_u32(reader + self.layout.value + self.gl.token_layout.id, SENTINEL % 2 ^ 32)
         self.statement_line = nil
     end)
-    if self.f.register_variable then
-        m:on_enter(self.f.register_variable, function(mm)
-            -- the lexer's token is the variable's name (`@x`); its value comes after
-            local reader = mm.bits == 64 and tonumber(mm.engine:reg("rdi")) or mm:u32(mm:sp() + 4)
-            self.variables = self.variables or {}
-            local name = self:current(reader)
+    -- the scripted variables registered: RegisterVariableInList (2.x on, a statement's local list)
+    -- or RegisterVariable (every version); one calls the other in some versions, so a variable is
+    -- recorded once per place in the text
+    local function registered(mm)
+        -- the lexer's token is the variable's name (`@x`); its value comes after
+        local reader = mm.bits == 64 and tonumber(mm.engine:reg("rdi")) or mm:u32(mm:sp() + 4)
+        self.variables = self.variables or {}
+        local name = self:current(reader)
+        local lexer = mm:ptr(reader + self.reader_lexer)
+        local at = (name and name.text or "?") .. "@" .. tostring(mm:ptr(lexer + self.word))
+        if at ~= self.last_variable_at then
             self.variables[#self.variables + 1] = name and name.text or "?"
-        end)
+            self.last_variable_at = at
+        end
+    end
+    for _, key in ipairs({ "register_variable", "register_variable_global" }) do
+        if self.f[key] then
+            m:on_enter(self.f[key], registered)
+        end
     end
 end
 
@@ -230,6 +250,7 @@ function Reader:read(text)
     local m = self.m
     local s = self:open(text)
     self.variables = {}
+    self.last_variable_at = nil
     self.inline_scripts = 0
     local tree = {}
     local logged = #(m.log or {})

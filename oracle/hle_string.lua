@@ -161,6 +161,20 @@ F["7compareEPKc"] = function(m)
     if a == b then return 0 end
     return a < b and -1 or 1
 end
+-- compare(pos, n, const string&): the substring [pos, pos + n) with the other string
+F["7compareEmmRKS4_"] = function(m)
+    local a = sub(text(m, m:arg(1)), m:arg(2), idx(m, 3))
+    local b = text(m, m:arg(4))
+    if a == b then return 0 end
+    return a < b and -1 or 1
+end
+-- compare(pos, n, const char*)
+F["7compareEmmPKc"] = function(m)
+    local a = sub(text(m, m:arg(1)), m:arg(2), idx(m, 3))
+    local b = m:cstring(m:arg(4))
+    if a == b then return 0 end
+    return a < b and -1 or 1
+end
 F["7compareERKS4_"] = function(m)
     local a, b = text(m, m:arg(1)), text(m, m:arg(2))
     if a == b then return 0 end
@@ -266,7 +280,8 @@ end
 
 local PREFIX = "_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE"
 local PREFIX_K = "_ZNKSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE"
-local CONST = { ["7compareEPKc"] = true, ["7compareERKS4_"] = true, ["4findEPKcmm"] = true,
+local CONST = { ["7compareEPKc"] = true, ["7compareERKS4_"] = true, ["7compareEmmRKS4_"] = true,
+    ["7compareEmmPKc"] = true, ["4findEPKcmm"] = true,
     ["4findEcm"] = true, ["5rfindEcm"] = true, ["5rfindEPKcmm"] = true, ["6substrEmm"] = true,
     ["12find_first_ofEPKcmm"] = true, ["16find_first_not_ofEPKcmm"] = true,
     ["11find_last_ofEPKcmm"] = true }
