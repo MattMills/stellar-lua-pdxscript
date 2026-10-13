@@ -52,12 +52,15 @@ pdxlexer.NOT_EQ = 1063     -- != (from 3.x)
 --                ReadUntilCharacter (lex:read_until), which the lexer has
 --   long_token   "overflow": a token longer than 256 bytes overruns the token's buffer (1.0.x, a
 --                bug: not imitated, but lex.long_tokens counts them)
+--   keywords     words whose id is that of punctuation (3.x: NOT is `!`, 1062), known without a
+--                lookup
 pdxlexer.PROFILES = {
     { version = "1.0.0", comparisons = false, bang = "comment", nul = "ends", read_math = false,
         long_token = "overflow" },
     { version = "1.1.0", comparisons = false, bang = "comment", nul = "ends", read_math = false },
     { version = "2.3.0", comparisons = true, bang = "comment", nul = "kept", read_math = true },
-    { version = "3.12.5", comparisons = true, bang = "token", nul = "kept", read_math = true },
+    { version = "3.12.5", comparisons = true, bang = "token", nul = "kept", read_math = true,
+        keywords = { ["not"] = 1062 } },
 }
 
 -- the versions whose lexers were measured; between two ranges the profile is the earlier one's,
@@ -376,6 +379,9 @@ function Lexer:next()
         local id, key, fallback = word_class(self, self.text)
         if id == nil then
             local found = self.lookup and self.lookup(key)
+            if not found and self.profile.keywords then
+                found = self.profile.keywords[key]
+            end
             id = found and found ~= 12 and found or nil
             self.key, self.fallback = key, fallback
             if id == nil and (self.lookup or fallback == 12) then

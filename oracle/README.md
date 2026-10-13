@@ -104,3 +104,57 @@ every call (rc, id kind, quoted flag, text, line, position, last byte, put-back 
 stellarstellaris-win's `lua/stellar/script/lexer.lua` (written for 4.5.2) is exact for 3.12.5 to
 4.5.2 and differs before, where the profiles change. A version in a gap between measured ranges
 gets the earlier profile, marked `uncertain` when a profile changes in that gap.
+
+## Results: the statement readers of 50 builds
+
+`gamereader.lua` runs a build's own `CPersistent::Read` (a loop of `CReader::ReadSimpleStatement`
+and the object's `ReadMember`) on any text: the object is of the game's class, with `ReadMember` in
+Lua, which records the key, operator and value the reader holds (where it keeps them is probed:
+`zzkey = zzval` read, then looked for) and reads a `{` value as an object's member does, with
+`CReader::Read(CPersistent&)` in a nested emulation. The reader's own messages are captured from
+its loggers (`CNullLogger::Log` and the others, `gamelog.lua`).
+
+The 81 reader cases (`reader_cases.lua`) on the 50 builds split only at the eras:
+
+| | 1.0.0 to 1.2.5 | 2.3.0 to 2.5.0 | 3.12.5 to 4.5.2 |
+|---|---|---|---|
+| operators | `=` `<` `>` (so `a >= 1` is `a >` with the value `=`, then `1` a new key) | `=` `<` `>` `<=` `>=` | and `!=` |
+| a `}` where a value should be | the value is a NUMBER `4` | the value is `}` | the value is `}` |
+| variable names | anything | a letter, then letters, digits, `_` ("Invalid variable name [1]. ...") | the same |
+| a name already taken | logged; its `=` and value are read as statements | logged; its `=` and value skipped | the same |
+| `@y = @x` | x read as another definition ("taken"), then resolved | resolved, and the token after it skipped | the same |
+| inline math | none: `@[` is a word | 3 decimals, 32-bit (`7.000`, `0.333`) | 5 decimals, 64-bit (`7`, `0.33333`) |
+| `%` in math | | an invalid character, dropped (`7 % 3` is `73.000`) | the remainder |
+| inline scripts | | | read from the game's files |
+
+In every version: `?=` is not an operator (`a ?= b` is `a`, then the key `?`); a quoted `"@x"` is
+not a variable; a file whose last statement is a variable definition hands the object the previous
+statement's key again; the first definition of a name wins.
+
+Three of these are the game doing what nobody meant, and a modder can hit them:
+`@a = @[ 1 + 2 ]` (or `@a = @b`) skips the token after it, from 2.3 (`@a = @[ 1 + 2 ] @b = 5`
+leaves `@b` undefined); inline math as the very last value of a file makes the reader read past
+the end of the file for a `]`, forever (2.3 on); a file that ends in a variable definition reads
+its last key twice. Vanilla never does any of them. `pdxreader` reports them in `tree.bugs`, and
+`pdxast` as diagnostics.
+
+`pdxreader.lua` is checked with `tools/oracle_check_reader.lua` (the reader cases: the same
+statements, variables and messages in all 50 builds) and `tools/oracle_readfuzz.lua`, which reads
+random texts made of script's pieces with a build's reader and with pdxreader and shrinks each text
+read differently to the fewest pieces that still differ. The fuzzer found what the cases did not
+(1.x registers a name once its `=` is read; a quoted `"@x"` is not a variable; NOT has `!`'s id in
+3.x); now 3,000 random texts per build read the same on all 50 builds, and 2,000 with inline math on
+1.2.5, 2.3.3, 2.5.0, 3.12.5, 4.3.2, 4.3.3 and 4.5.2.
+
+## Results: the vanilla corpora
+
+The GOG archive keeps the game's files for 70 versions (2.1.4.4 to 3.10.4); 4.5.2's are the
+installed game's. `tools/ast_check.lua` reads every script file of each with that version's
+profile: all print back byte for byte from pdxast, and pdxscript reads all with 0 errors (two
+tolerances were added for them: `bracket_word` for 2.8's `log = [from.GetName]`, `stray_operator`
+for 2.2 to 2.5's `ion_cannon = { = {`).
+
+What the corpora say about the gaps: 2.1.4.4 to 2.2.7 use `>=` and `<=` 4,777 times, so their
+lexer has one-token comparisons (measured from 2.3.0 only); 2.6 to 3.10 use `!=` 342 times, so
+`!` is an operator before 3.12.5 (measured from 3.12.5 only). The Windows builds of those versions
+will say exactly when.

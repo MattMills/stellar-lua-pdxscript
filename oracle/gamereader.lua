@@ -37,8 +37,9 @@ local NAMES = {
     read_member = { "_ZN11CPersistent10ReadMemberER7CReaderi", "?ReadMember@CPersistent@@UEAAXAEAVCReader@@H@Z",
         "?ReadMember@CPersistent@@UAEXAAVCReader@@H@Z" },
     vtable = { "_ZTV11CPersistent" },
-    register_variable = { "_ZN7CReader22RegisterVariableInListER9CPdxArrayINS_15SReaderVariableEiE",
-        "_ZN7CReader16RegisterVariableEv", "^%?RegisterVariableInList@CReader@@" },
+    -- (its list is a CArray in 2.x, a CPdxArray from 3.x: a pattern)
+    register_variable = { "^_ZN7CReader22RegisterVariableInListER", "^%?RegisterVariableInList@CReader@@" },
+    register_variable_global = { "_ZN7CReader16RegisterVariableEv", "^%?RegisterVariable@CReader@@" },
     inline_script = { "_Z24CreateInlineScriptReaderR7CReader", "^%?CreateInlineScriptReader@@YA" },
 }
 gamereader.NAMES = NAMES
@@ -48,6 +49,8 @@ local SENTINEL = -0x4f52  -- an id no token has: "this field was not set by the 
 local Reader = {}
 Reader.__index = Reader
 
+-- the functions of NAMES in the image: a name is a mangled name, or a Lua pattern (starting with
+-- ^) that exactly one symbol must match
 local function locate(m)
     local f = {}
     for key, names in pairs(NAMES) do
@@ -296,14 +299,28 @@ function Reader:probe_reader()
         mm:set_u32(reader + self.layout.value + self.gl.token_layout.id, SENTINEL % 2 ^ 32)
         self.statement_line = nil
     end)
-    if self.f.register_variable then
-        m:on_enter(self.f.register_variable, function(mm)
-            -- the lexer's token is the variable's name (`@x`); its value comes after
-            local reader = mm:arg(1)
-            self.variables = self.variables or {}
-            local name = self:current(reader)
+    -- the scripted variables registered: RegisterVariableInList (2.x on, a statement's local list)
+    -- or RegisterVariable (every version); one calls the other in some versions, so a variable is
+    -- recorded once per place in the text
+    local function registered(mm)
+        -- the lexer's token is the variable's name (`@x`); its value comes after
+        local reader = mm:arg(1)
+        self.variables = self.variables or {}
+        local name = self:current(reader)
+        -- the place: the file's read position (CMemoryFile::GetPosition, nested), else the lexer
+        local lexer = mm:ptr(reader + self.reader_lexer)
+        local file = mm:ptr(lexer + self.word)
+        local place = self.gl.f.pos and mm:call(self.gl.f.pos, file) or lexer
+        local at = (name and name.text or "?") .. "@" .. tostring(place)
+        if at ~= self.last_variable_at then
             self.variables[#self.variables + 1] = name and name.text or "?"
-        end)
+            self.last_variable_at = at
+        end
+    end
+    for _, key in ipairs({ "register_variable", "register_variable_global" }) do
+        if self.f[key] then
+            m:on_enter(self.f[key], registered)
+        end
     end
 end
 
@@ -345,6 +362,7 @@ function Reader:read(text)
     local m = self.m
     local s = self:open(text)
     self.variables = {}
+    self.last_variable_at = nil
     self.inline_scripts = 0
     local tree = {}
     local logged = #(m.log or {})
