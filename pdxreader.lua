@@ -101,9 +101,14 @@ local function starts_with_at(t)
     return t and byte(t.text, 1) == 64
 end
 
+-- the location the reader's messages end in (2.x on: CReader::GetFileLocationDescription)
+function Reader:where()
+    return " file: " .. (self.name or "") .. " line: " .. self.lex.line
+end
+
 function Reader:log(message)
     if self.profile.located then
-        message = message .. "  file: " .. (self.name or "") .. " line: " .. self.lex.line
+        message = message .. " " .. self:where()
     end
     self.messages[#self.messages + 1] = message
 end
@@ -128,10 +133,13 @@ end
 -- lexer has just read: a variable's value, or inline math (2.x on) evaluated
 function Reader:advanced(t)
     local text = t.text
-    local math_open = sub(text, 1, 2) == "@[" or sub(text, 1, 3) == "@\\["
-    if math_open and self.profile.math then
-        local expr = text
-        if sub(text, -1) ~= "]" then
+    -- inline math (2.x on): `@[` (`@\[` is a plain word here: it becomes `@[` only in a scripted
+    -- trigger's or effect's text, once its parameters are put in)
+    if sub(text, 1, 2) == "@[" and self.profile.math and not t.quoted then
+        local expr
+        if sub(text, -1) == "]" then
+            expr = sub(text, 3, -2)
+        else
             -- the rest of the math, raw, to its ']' (CTextLexer::ReadUntilCharacter)
             local rest = self.lex:read_until("]")
             if rest == nil then
@@ -139,23 +147,34 @@ function Reader:advanced(t)
                 self.stop = true
                 return { id = 12, text = "0" }
             end
-            expr = expr .. rest .. "]"
+            expr = sub(text, 3) .. rest
         end
-        local inner = expr:match("^@\\?%[(.*)%]$") or ""
         if pdxmath and self.profile.math_profile then
-            local result, _, messages = pdxmath.evaluate(inner, self.profile.math_profile, function(name)
+            local result, _, messages, id, crash = pdxmath.evaluate(expr, self.profile.math_profile, function(name)
                 local v = self:variable(name)
-                return v and v.text
-            end)
+                if v then
+                    return v.text, v.id
+                end
+            end, self:where())
+            -- (pdxmath's messages end in the location already)
             for _, msg in ipairs(messages or {}) do
-                self:log(msg)
+                self.messages[#self.messages + 1] = msg
             end
-            if result then
-                return { id = 13, text = result }
+            if crash then
+                self:bug("math_crash", "inline math the game's process dies on (an integer division fault)")
+                self.stop = true
+                return { id = 12, text = "0" }
             end
-            return { id = 12, text = "0" }
+            if result == nil then
+                return t  -- "@[]": the token as it is
+            end
+            return { id = id, text = result }
         end
-        return { id = 13, text = "@[" .. inner .. "]", unevaluated = true }
+        return { id = 13, text = "@[" .. expr .. "]", unevaluated = true }
+    end
+    -- a quoted "@x" is not a variable (it is read as the string it is)
+    if t.quoted then
+        return t
     end
     local v = self:variable(sub(text, 2))
     if v then
@@ -245,8 +264,11 @@ function Reader:simple()
         if lex:next() == 0 then
             -- the statement is the previous one's key, again
             -- the statement is the previous one's key again (or, if there was none, the reader's
-            -- first, empty token): the game hands it to the object once more
-            self:bug("stale_key", "a variable definition at the end: the game reads the previous key again")
+            -- first, empty token): the game hands it to the object once more. (A file of only
+            -- variables, as in common/scripted_variables, is read by another reader.)
+            if self.key then
+                self:bug("stale_key", "a variable definition at the end: the game reads the previous key again")
+            end
             stmt.key = self.key or { id = 0, text = "" }
             stmt.next = token_of(lex)
             return stmt
