@@ -12,6 +12,12 @@
 --
 -- Errors raised by m:call name what happened: the address that faulted, the function it was in,
 -- the import that is not implemented, and the last imports called.
+--
+-- The image is an ELF executable (oracle/elf.lua: the System V ABI, glibc's thread pointer) or a
+-- Windows one (oracle/pe.lua, image.abi "win64" or "win32": the Microsoft calling conventions, a
+-- TEB with the executable's TLS block, the imports of oracle/hle_msvc.lua). m:call, m:arg and
+-- m:set_return follow the image's ABI; on i386 Windows each function's convention (__thiscall,
+-- __stdcall, __cdecl) and what it pops come from its decorated name (oracle/msvc.lua).
 
 local ffi = require("ffi")
 local bit = require("bit")
@@ -49,19 +55,39 @@ function machine.new(image, options)
     local bits = image.bits
     local L = LAYOUT[bits]
     local e = uc.open(bits)
+    local windows = image.format == "pe"
+    local base = windows and image.base or (image.pie and L.pie_base or 0)
+    local imports = windows and require("oracle.hle_msvc").windows or hle.linux
     local m = setmetatable({ image = image, engine = e, bits = bits, layout = L,
-        word = bits / 8, base = image.pie and L.pie_base or 0, stubs = {}, stub_names = {},
+        word = bits / 8, base = base, stubs = {}, stub_names = {},
         stub_count = 1, data_imports = {}, lenient = options.lenient,
-        platform = options.platform or "linux", hle = setmetatable(options.hle or {}, { __index = hle.linux }),
+        abi = image.abi or (bits == 64 and "sysv" or "i386"), windows = windows,
+        platform = options.platform or (windows and "windows" or "linux"),
+        hle = setmetatable(options.hle or {}, { __index = imports }), stub_conv = {},
         recent = {}, recent_n = 0, unimplemented = {}, enter_hooks = {}, stdout = {},
         heap_top = L.heap, heap_mapped = L.heap, free_lists = {}, calls = 0 }, Machine)
     m.buf8 = ffi.new("uint8_t[8]")
 
     -- the image
+    local mapped = {}
     for _, seg in ipairs(image.segments) do
         local start = page_down(m.base + seg.vaddr)
         local stop = page_up(m.base + seg.vaddr + seg.memsz)
-        e:map(start, stop - start)
+        -- (PE sections are page-aligned; a page already mapped is not mapped again)
+        local a = start
+        while a < stop do
+            if not mapped[a] then
+                local b = a
+                while b < stop and not mapped[b] do
+                    mapped[b] = true
+                    b = b + PAGE
+                end
+                e:map(a, b - a)
+                a = b
+            else
+                a = a + PAGE
+            end
+        end
         if seg.filesz > 0 then
             e:write(m.base + seg.vaddr, ffi.cast("const uint8_t *", image.data) + seg.offset, seg.filesz)
         end
@@ -99,15 +125,19 @@ function machine.new(image, options)
     e:map(L.stack_top - L.stack_size, L.stack_size)
     e:map(L.tls, L.tls_size)
     m.tp = L.tls + L.tls_size / 2
-    if bits == 64 then
+    if windows then
+        m:setup_teb()
+    elseif bits == 64 then
         e:set_reg("fs_base", m.tp)
     else
         e:map(L.gdt, PAGE)
         e:setup_gdt(L.gdt, 6, m.tp)
     end
-    m:set_ptr(m.tp, m.tp)                         -- tcb->tcb (fs:0 / gs:0)
-    m:set_ptr(m.tp + (bits == 64 and 0x28 or 0x14), bits == 64 and 0x1d3a91c6e5b047 or 0x91c6e5b0) -- stack guard
-    if image.tls then
+    if not windows then
+        m:set_ptr(m.tp, m.tp)                         -- tcb->tcb (fs:0 / gs:0)
+        m:set_ptr(m.tp + (bits == 64 and 0x28 or 0x14), bits == 64 and 0x1d3a91c6e5b047 or 0x91c6e5b0) -- stack guard
+    end
+    if image.tls and not windows then
         local t = image.tls
         local size = t.memsz + (t.align - t.memsz % t.align) % t.align
         m.tls_block = m.tp - size
@@ -118,7 +148,11 @@ function machine.new(image, options)
     end
     m.errno = m:alloc(16)
 
-    m:relocate()
+    if windows then
+        m:bind_imports()
+    else
+        m:relocate()
+    end
 
     -- hooks: the stubs, and the faults
     e:hook("code", function(address)
@@ -135,7 +169,30 @@ function machine.new(image, options)
         m.fault = m.fault or { kind = "interrupt " .. intno, pc = m:pc() }
         e:stop()
     end)
+    if windows and not options.no_crt_init then
+        m:crt_init()
+    end
     return m
+end
+
+-- Windows: the statically linked C runtime initialized as WinMainCRTStartup does before anything
+-- else (__security_init_cookie, then __scrt_initialize_crt: the processor's features, vcruntime's
+-- and the UCRT's state: its heap, locks, per-thread data, the encoded pointers of its Windows API
+-- thunks, stdio, the locale). Without it the UCRT decodes pointers that were never encoded.
+function Machine:crt_init()
+    local u = self.bits == 32 and "_" or ""
+    local results = {}
+    for _, step in ipairs({ { "__security_init_cookie" }, { "__scrt_initialize_crt", 1 } }) do
+        local a = self:has(u .. step[1])
+        if a then
+            local ok, r = pcall(self.call, self, a, step[2])
+            results[#results + 1] = { name = step[1], ok = ok, result = ok and r or nil, error = not ok and r or nil }
+        else
+            results[#results + 1] = { name = step[1], ok = false, error = "not found" }
+        end
+    end
+    self.crt_init_results = results
+    return results
 end
 
 function Machine:pc()
@@ -163,8 +220,10 @@ function Machine:where(address)
     return string.format("0x%x", address)
 end
 
--- the stub for an imported function
-function Machine:stub(name)
+-- the stub for an imported function. like: on i386 Windows, the address of a function of the game
+-- whose calling convention the stub has (a Lua function standing in for it), or a convention
+-- { kind = "thiscall" | "stdcall" | "cdecl" | "fastcall", pops = n }
+function Machine:stub(name, like)
     local s = self.stubs[name]
     if not s then
         s = self.layout.stub + 16 * self.stub_count
@@ -173,7 +232,23 @@ function Machine:stub(name)
         self.stubs[name] = s
         self.stub_names[s] = name
     end
+    if like and self.windows and self.bits == 32 then
+        self.stub_conv[s] = type(like) == "table" and like or self:convention_at(like) or false
+    end
     return s
+end
+
+-- the calling convention of the game's function at address (i386 Windows: from its decorated
+-- name), or nil
+function Machine:convention_at(address)
+    if not (self.windows and self.bits == 32) or not self.image.convention then
+        return nil
+    end
+    local sig = self.image:convention(address - self.base)
+    if sig and sig.kind == "function" then
+        return { kind = sig.convention, pops = sig.pops or 0 }
+    end
+    return nil
 end
 
 -- the storage for an imported data object (an empty block)
@@ -250,6 +325,101 @@ function Machine:relocate()
             elseif t == R32.TLS_DTPOFF32 then
                 self:set_u32(at, ((r.value or 0) + a) % 2 ^ 32)
             end
+        end
+    end
+end
+
+-- Windows ----------------------------------------------------------------------------------------
+
+-- the thread environment block: x86-64 gs, i386 fs. Its self pointer, the stack's base and limit
+-- (__chkstk compares with the limit), the thread id, the process environment block (its
+-- ProcessHeap), and ThreadLocalStoragePointer: an array whose slot _tls_index (0) is a copy of the
+-- executable's TLS template (thread-safe statics keep their epoch there)
+function Machine:setup_teb()
+    local L, e, w = self.layout, self.engine, self.word
+    local teb = L.tls
+    local x64 = self.bits == 64
+    self.teb = teb
+    self.peb = L.tls + 0x3000
+    self.tls_array = L.tls + 0x2000
+    if x64 then
+        e:set_reg("gs_base", teb)
+    else
+        e:map(L.gdt, PAGE)
+        e:setup_gdt(L.gdt, 6, teb, "fs")
+    end
+    local o = x64 and { stack_base = 0x8, stack_limit = 0x10, self = 0x30, pid = 0x40, tid = 0x48,
+        tls = 0x58, peb = 0x60, last_error = 0x68 } or { stack_base = 0x4, stack_limit = 0x8,
+        self = 0x18, pid = 0x20, tid = 0x24, tls = 0x2c, peb = 0x30, last_error = 0x34 }
+    self.teb_offsets = o
+    if not x64 then
+        self:set_u32(teb, 0xffffffff)  -- the end of the SEH chain
+    end
+    self:set_ptr(teb + o.stack_base, L.stack_top)
+    self:set_ptr(teb + o.stack_limit, L.stack_top - L.stack_size)
+    self:set_ptr(teb + o.self, teb)
+    self:set_ptr(teb + o.pid, 0x1000)
+    self:set_ptr(teb + o.tid, 0x1004)
+    self:set_ptr(teb + o.tls, self.tls_array)
+    self:set_ptr(teb + o.peb, self.peb)
+    self.process_heap = 0x50000
+    self:set_ptr(self.peb + (x64 and 0x10 or 0x8), self.base)          -- ImageBaseAddress
+    self:set_ptr(self.peb + (x64 and 0x30 or 0x18), self.process_heap)  -- ProcessHeap
+    local t = self.image.tls
+    if t then
+        local block = L.tls + 0x4000
+        local size = t.stop - t.start
+        if size > 0 then
+            self:write(block, self:read(t.start, size), size)
+        end
+        self.tls_block = block
+        self.tls_block_size = size + t.zero_fill
+        assert(self.tls_block_size < L.tls_size - 0x4000, "TLS template too large")
+        self:set_ptr(self.tls_array, block)   -- slot 0
+        self:set_u32(t.index, 0)              -- _tls_index
+    end
+end
+
+-- the convention of an import on i386 Windows: a C++ name has its own (oracle/msvc.lua); a C
+-- name of a C runtime DLL is __cdecl, of any other DLL (the Windows API) __stdcall, its argument
+-- count from the implementation's table (hle_msvc: arity)
+local CRT_DLL = { ["ucrtbase.dll"] = true, ["vcruntime140.dll"] = true, ["msvcrt.dll"] = true,
+    ["msvcp140.dll"] = true }
+function Machine:import_convention(dll, name)
+    if self.bits == 64 then
+        return nil
+    end
+    if name and name:sub(1, 1) == "?" then
+        local sig = require("oracle.msvc").signature(name, 32)
+        if sig and sig.kind == "function" then
+            return { kind = sig.convention, pops = sig.pops or 0 }
+        end
+        return nil
+    end
+    local d = (dll or ""):lower()
+    if CRT_DLL[d] or d:find("^api%-ms%-win%-crt") then
+        return { kind = "cdecl", pops = 0 }
+    end
+    return { kind = "stdcall", stdcall_import = true }
+end
+
+-- a PE's imports: each IAT slot gets the stub of its function (a C++ variable: a block of data)
+function Machine:bind_imports()
+    local msvc = require("oracle.msvc")
+    for _, imp in ipairs(self.image.imports) do
+        local name = imp.name or string.format("%s!#%d", imp.dll, imp.ordinal)
+        local at = self.base + imp.iat
+        local sig = imp.name and imp.name:sub(1, 1) == "?" and msvc.signature(imp.name, self.bits)
+        if sig and sig.kind == "variable" then
+            self:set_ptr(at, self:data_import(name))
+        else
+            local s = self:stub(name)
+            self.stub_dll = self.stub_dll or {}
+            self.stub_dll[s] = imp.dll
+            if self.stub_conv[s] == nil then
+                self.stub_conv[s] = self:import_convention(imp.dll, imp.name) or false
+            end
+            self:set_ptr(at, s)
         end
     end
 end
@@ -407,17 +577,49 @@ end
 -- calls ------------------------------------------------------------------------------------------
 
 local ARG64 = { "rdi", "rsi", "rdx", "rcx", "r8", "r9" }
+local ARGWIN64 = { "rcx", "rdx", "r8", "r9" }
 
--- the i-th integer argument (1-based) of the import being called (at its stub)
+-- the i-th integer argument (1-based) of the import being called (at its stub), or of the
+-- function entered (in an m:on_enter hook). On x86-64 Windows: rcx, rdx, r8, r9, then the stack
+-- above the 32 bytes of shadow space. On i386 Windows the convention of the stub or function:
+-- __thiscall has `this` (argument 1) in ecx, __fastcall the first two in ecx and edx.
 function Machine:arg(i)
     local e = self.engine
     if self.bits == 64 then
+        if self.abi == "win64" then
+            if i <= 4 then
+                return tonumber(e:reg(ARGWIN64[i]))
+            end
+            return self:u64(self:sp() + 8 * i)
+        end
         if i <= 6 then
             return tonumber(e:reg(ARG64[i]))
         end
         return self:u64(self:sp() + 8 * (i - 6))
     end
+    local conv = self.cur_conv
+    if conv then
+        if conv.kind == "thiscall" then
+            if i == 1 then return tonumber(e:reg("ecx")) end
+            return self:u32(self:sp() + 4 * (i - 1))
+        elseif conv.kind == "fastcall" then
+            if i == 1 then return tonumber(e:reg("ecx")) end
+            if i == 2 then return tonumber(e:reg("edx")) end
+            return self:u32(self:sp() + 4 * (i - 2))
+        end
+    end
     return self:u32(self:sp() + 4 * i)
+end
+
+-- the i-th argument as a 32-bit unsigned or signed integer (an int, a DWORD: on x86-64 the upper
+-- half of its register or stack slot is not set by the caller)
+function Machine:arg32(i)
+    return self:arg(i) % 2 ^ 32
+end
+
+function Machine:sarg32(i)
+    local v = self:arg(i) % 2 ^ 32
+    return v >= 2 ^ 31 and v - 2 ^ 32 or v
 end
 
 function Machine:sarg(i)
@@ -455,9 +657,10 @@ function Machine:stub_hit(address)
     self.recent_n = self.recent_n + 1
     self.recent[(self.recent_n - 1) % 16 + 1] = name
     local f = self.hle[name]
+    local conv = self.stub_conv[address]
     if f == nil then
         self.unimplemented[name] = (self.unimplemented[name] or 0) + 1
-        if self.lenient then
+        if self.lenient and not (conv and conv.stdcall_import) then
             self:set_return(0)
             return
         end
@@ -465,7 +668,10 @@ function Machine:stub_hit(address)
         self.engine:stop()
         return
     end
+    local was = self.cur_conv
+    self.cur_conv = conv or nil
     local ok, r = pcall(f, self, name)
+    self.cur_conv = was
     if not ok then
         self.fault = self.fault or { kind = "import " .. name .. " failed: " .. tostring(r),
             pc = self:ptr(self:sp()) }
@@ -475,6 +681,32 @@ function Machine:stub_hit(address)
     if type(r) ~= "string" then
         self:set_return(r)
     end
+    -- i386 Windows: a __stdcall or __thiscall function removes its arguments (`ret n`); for an
+    -- import of the Windows API the count of arguments is the implementation's (hle_msvc: arity)
+    if conv and r ~= "noreturn" and r ~= "redirected" then
+        local pops = conv.pops
+        if conv.stdcall_import then
+            local n = self.hle.arity and self.hle.arity[name]
+            if not n then
+                self.fault = self.fault or { kind = "import " .. name .. ": its count of arguments is not known",
+                    pc = self:ptr(self:sp()) }
+                self.engine:stop()
+                return
+            end
+            pops = 4 * n
+        end
+        if pops and pops > 0 then
+            self:pop_arguments(pops)
+        end
+    end
+end
+
+-- removes n bytes of arguments above the return address (the stub's `ret` then returns)
+function Machine:pop_arguments(n)
+    local sp = self:sp()
+    local r = self:u32(sp)
+    self:set_u32(sp + n, r)
+    self.engine:set_reg("esp", sp + n)
 end
 
 function Machine:mem_fault(t, address, size, value)
@@ -486,12 +718,11 @@ end
 -- m:callee_pops(n) inside an import: on i386 a function that returns a struct through a hidden
 -- pointer removes that pointer from the stack itself (`ret 4`); the stub only has `ret`, so the
 -- return address is moved up by n bytes first
+-- (on Windows the caller removes it: MSVC's __cdecl; a __thiscall function's pops come from its
+-- name, so this does nothing there)
 function Machine:callee_pops(n)
-    if self.bits == 32 then
-        local sp = self:sp()
-        local r = self:u32(sp)
-        self:set_u32(sp + n, r)
-        self.engine:set_reg("esp", sp + n)
+    if self.bits == 32 and not self.windows then
+        self:pop_arguments(n)
     end
 end
 
@@ -520,7 +751,25 @@ function Machine:call(address, ...)
     else
         sp = L.stack_top - 0x10000
     end
-    if self.bits == 64 then
+    if self.abi == "win64" then
+        -- rcx, rdx, r8, r9, then the stack above 32 bytes of shadow space
+        local extra = math.max(#args, 4)
+        sp = sp - 8 * extra
+        sp = sp - sp % 16 - 8  -- at entry, rsp + 8 is 16-aligned
+        self:set_u64(sp, self.exit)
+        for i = 1, #args do
+            local v = args[i]
+            if type(v) == "boolean" then v = v and 1 or 0 end
+            if v < 0 then v = ffi.cast("uint64_t", ffi.cast("int64_t", v)) end
+            if i <= 4 then
+                e:set_reg(ARGWIN64[i], v)
+            else
+                self:set_u64(sp + 8 * i, v)
+            end
+        end
+        e:set_reg("rsp", sp)
+        e:set_reg("rbp", 0)
+    elseif self.bits == 64 then
         local extra = math.max(#args - 6, 0)
         sp = sp - 8 * extra
         sp = sp - sp % 16 - 8  -- at entry, rsp + 8 is 16-aligned
@@ -538,14 +787,31 @@ function Machine:call(address, ...)
         e:set_reg("rsp", sp)
         e:set_reg("rbp", 0)
     else
-        sp = sp - 4 * #args
-        sp = sp - sp % 16 - 4
-        self:set_u32(sp, self.exit)
+        -- i386: on the stack (cdecl, stdcall); __thiscall has `this` in ecx, __fastcall the
+        -- first two in ecx and edx (i386 Windows: the function's decorated name says which)
+        local conv = self.windows and self:convention_at(address)
+        local regs = {}
+        if conv and conv.kind == "thiscall" then
+            regs = { "ecx" }
+        elseif conv and conv.kind == "fastcall" then
+            regs = { "ecx", "edx" }
+        end
+        local stack = {}
         for i = 1, #args do
             local v = args[i]
             if type(v) == "boolean" then v = v and 1 or 0 end
             if v < 0 then v = v + 2 ^ 32 end
-            self:set_u32(sp + 4 * i, v)
+            if regs[i] then
+                e:set_reg(regs[i], v)
+            else
+                stack[#stack + 1] = v
+            end
+        end
+        sp = sp - 4 * #stack
+        sp = sp - sp % 16 - 4
+        self:set_u32(sp, self.exit)
+        for i = 1, #stack do
+            self:set_u32(sp + 4 * i, stack[i])
         end
         e:set_reg("esp", sp)
         e:set_reg("ebp", 0)
@@ -615,7 +881,7 @@ end
 function Machine:replace(address, fn, name)
     name = name or ("<replaced " .. self:where(address) .. ">")
     rawset(self.hle, name, fn)
-    local stub = self:stub(name)
+    local stub = self:stub(name, address)
     local code
     if self.bits == 64 then
         -- jmp [rip + 0]; the stub's address
@@ -654,6 +920,22 @@ function Machine:initializers()
             out[#out + 1] = { address = v, name = image:name_at(v - self.base) or string.format("0x%x", v) }
         end
     end
+    if self.windows then
+        -- MSVC: the C initializers (__xi_a to __xi_z, run by _initterm_e) then the C++ ones
+        -- (__xc_a to __xc_z, _initterm): tables of function pointers, null entries skipped. On
+        -- i386 the C names have a leading underscore.
+        local u = self.bits == 32 and "_" or ""
+        for _, t in ipairs({ "xi", "xc" }) do
+            local a = image:symbol(u .. "__" .. t .. "_a")
+            local z = image:symbol(u .. "__" .. t .. "_z")
+            if a and z then
+                for p = self.base + a, self.base + z - w, w do
+                    add(self:ptr(p))
+                end
+            end
+        end
+        return out
+    end
     for _, name in ipairs({ ".preinit_array", ".init_array" }) do
         local s = image.sections[name]
         if s and s.size > 0 then
@@ -688,10 +970,15 @@ function Machine:static_init(filter, lenient)
     return results
 end
 
--- m:on_enter(address, fn): fn(m) each time the game's code reaches address (a function's entry)
+-- m:on_enter(address, fn): fn(m) each time the game's code reaches address (a function's entry);
+-- inside fn, m:arg(i) is the function's i-th argument
 function Machine:on_enter(address, fn)
+    local conv = self:convention_at(address)
     return self.engine:hook("code", function()
+        local was = self.cur_conv
+        self.cur_conv = conv
         fn(self)
+        self.cur_conv = was
     end, address, address)
 end
 

@@ -7,7 +7,7 @@
 local here = arg[0]:match("^(.*)[/\\]tools[/\\][^/\\]*$") or "."
 package.path = here .. "/?.lua;" .. here .. "/?/init.lua;" .. package.path
 
-local elf = require("oracle.elf")
+local loader = require("oracle.image")  -- an ELF or a PE executable
 local machine = require("oracle.machine")
 local gamelexer = require("oracle.gamelexer")
 local gamereader = require("oracle.gamereader")
@@ -26,7 +26,7 @@ else
     f:close()
 end
 
-local m = machine.new(elf.load(exe))
+local m = machine.new(loader.load(exe))
 local gl = gamelexer.new(m)
 local gr = gamereader.new(gl)
 io.stderr:write(string.format("reader: key +0x%x, operator +0x%x, value +0x%x; ReadMember is slot %d\n",

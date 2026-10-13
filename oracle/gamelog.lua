@@ -124,9 +124,107 @@ function gamelog.install_imports(L)
     end
 end
 
+-- The Windows builds: the game's own CLogStream (an MSVC std::ostringstream) runs as it is, and
+-- writes its message, when it is destroyed, to the logger CLogger::AccessInstance gives: the
+-- virtual CLogger::Log(int level, CString const& file, int line, CString const& message). The
+-- logger installed here (CLogger::_pInstance) is an object with CNullLogger's vtable, its Log
+-- replaced by Lua. A CString is an MSVC std::string (4.x: with an allocator before it): its
+-- characters inline while short, else behind a pointer, then the size and the capacity. Where,
+-- is found by making two with the game's CString(char const*).
+local function probe_cstring(m)
+    local ctor = m:has("??0CString@@QEAA@PEBD@Z") or m:has("??0CString@@QAE@PBD@Z")
+    if not ctor then return nil end
+    local w = m.word
+    local short, long = "ab", string.rep("L", 40) .. "probe"
+    local a, b = m:alloc(0x100), m:alloc(0x100)
+    m:call(ctor, a, m:string(short))
+    m:call(ctor, b, m:string(long))
+    local layout = {}
+    for o = 0, 0x60 - w, w do
+        if not layout.size and m:ptr(a + o) == #short and m:ptr(b + o) == #long then
+            layout.size = o
+        end
+    end
+    for o = 0, 0x60 - w, w do
+        if not layout.data then
+            local ok, s = pcall(m.cstring, m, m:ptr(b + o), #long + 1)
+            if ok and s == long and m:cstring(a + o, 8) == short then
+                layout.data = o
+            end
+        end
+    end
+    if layout.size then
+        layout.capacity = layout.size + w
+    end
+    if layout.size and layout.data then
+        return layout
+    end
+end
+
+local function msvc_string(m, s)
+    local L = m.cstring_layout
+    if not L then return "<CString>" end
+    local ok, text = pcall(function()
+        local size = m:ptr(s + L.size)
+        local cap = m:ptr(s + L.capacity)
+        if size > 1e6 then return "<CString>" end
+        local p = cap >= 16 and m:ptr(s + L.data) or s + L.data
+        return size > 0 and m:read(p, size) or ""
+    end)
+    return ok and text or "<CString>"
+end
+gamelog.msvc_string = msvc_string
+
+local function install_msvc(m)
+    local function find(names)
+        for _, n in ipairs(names) do
+            local a = m:has(n)
+            if a then return a, n end
+        end
+    end
+    local null_vt = find({ "??_7CNullLogger@@6B@" })
+    local instance = find({ "?_pInstance@CLogger@@0V?$unique_ptr@VCLogger@@U?$default_delete@VCLogger@@@std@@@std@@A",
+        "?_pInstance@CLogger@@0V?$auto_ptr@VCLogger@@@std@@A" })
+    if not (null_vt and instance) then
+        return 0
+    end
+    -- CNullLogger's Log: the slot of its vtable named so
+    local w, slots = m.word, 24
+    local vt = m:alloc(slots * w)
+    local log_slot, log_fn
+    for i = 0, slots - 1 do
+        local fn = m:ptr(null_vt + i * w)
+        m:set_ptr(vt + i * w, fn)
+        local name = m.image:name_at(fn - m.base)
+        if not log_slot and name and name:find("^%?Log@CNullLogger@@") then
+            log_slot, log_fn = i, fn
+        end
+    end
+    if not log_slot then
+        return 0
+    end
+    m.cstring_layout = probe_cstring(m)
+    local stub_name = "<oracle CLogger::Log>"
+    rawset(m.hle, stub_name, function(mm)
+        local level, file, line, message = mm:arg(2), mm:arg(3), mm:arg(4), mm:arg(5)
+        mm.log = mm.log or {}
+        mm.log[#mm.log + 1] = { file = msvc_string(mm, file), line = signed32(line), level = signed32(level),
+            text = msvc_string(mm, message) }
+    end)
+    m:set_ptr(vt + log_slot * w, m:stub(stub_name, log_fn))
+    local logger = m:alloc(0x400)
+    m:set_ptr(logger, vt)
+    m:set_ptr(instance, logger)
+    m.logger = logger
+    return 1
+end
+
 -- gamelog.install(m): the game's logging functions replaced on the machine
 function gamelog.install(m)
     m.log = m.log or {}
+    if m.windows then
+        return install_msvc(m)
+    end
     local n = 0
     for name, f in pairs(GAME) do
         if m:replace_symbol(name, f) then

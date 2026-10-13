@@ -13,22 +13,38 @@
 
 local gamelexer = {}
 
+-- Each function by its names: the Itanium names of the Linux builds, then the MSVC decorated
+-- names of the Windows builds (x86-64, then i386). The Windows builds have no
+-- CTextLexer(CFile*, bool) (it is inlined: CLexer's constructor, then CTextLexer's vtable),
+-- no CLexer::LineNumber and no CFile::UnGet (inlined); the file is probed with CMemoryFile::Get
+-- instead.
 local NAMES = {
-    gettok = { "_ZN10CTextLexer6GetTokEv" },
+    gettok = { "_ZN10CTextLexer6GetTokEv", "?GetTok@CTextLexer@@MEAAHXZ", "?GetTok@CTextLexer@@MAEHXZ" },
     lexer_ctor = { "_ZN10CTextLexerC2EP5CFileb", "_ZN10CTextLexerC1EP5CFileb" },
+    lexer_base_ctor = { "??0CLexer@@QEAA@PEAVCFile@@_N@Z", "??0CLexer@@QAE@PAVCFile@@_N@Z" },
+    text_lexer_vtable = { "??_7CTextLexer@@6B@" },
     file_ctor = { "_ZN11CMemoryFileC2EPhi9EFileType9EFileModeb",
-        "_ZN11CMemoryFileC1EPhi9EFileType9EFileModeb" },
-    tok = { "_ZN6CLexer3TokEv" },
+        "_ZN11CMemoryFileC1EPhi9EFileType9EFileModeb",
+        "??0CMemoryFile@@QEAA@PEAEHW4EFileType@@W4EFileMode@@_N@Z",
+        "??0CMemoryFile@@QAE@PAEHW4EFileType@@W4EFileMode@@_N@Z" },
+    tok = { "_ZN6CLexer3TokEv", "?Tok@CLexer@@QEAAAEAVCToken@@XZ", "?Tok@CLexer@@QAEAAVCToken@@XZ" },
     line = { "_ZNK6CLexer10LineNumberEv" },
-    pos = { "_ZNK11CMemoryFile11GetPositionEv" },
+    pos = { "_ZNK11CMemoryFile11GetPositionEv", "?GetPosition@CMemoryFile@@UEBA_JXZ",
+        "?GetPosition@CMemoryFile@@UBE_JXZ" },
     unget = { "_ZN5CFile5UnGetEc" },
-    token_ctor = { "_ZN6CTokenC2EiPKc", "_ZN6CTokenC1EiPKc" },
-    token_ctor_cstring = { "_ZN6CTokenC2EiRK7CString", "_ZN6CTokenC1EiRK7CString" },
-    cstring_ctor = { "_ZN7CStringC2EPKc", "_ZN7CStringC1EPKc" },
-    init_tokens = { "_ZN12CStaticLexer10InitTokensEv", "_ZN6CLexer10InitTokensEv" },
-    static_lexer = { "_ZN12CStaticLexer17AccessStaticLexerEv", "_ZN12CStaticLexer14GetStaticLexerEv" },
-    read_until = { "_ZN10CTextLexer18ReadUntilCharacterEc", "_ZN6CLexer18ReadUntilCharacterEc" },
+    file_get = { "?Get@CMemoryFile@@UEAADXZ", "?Get@CMemoryFile@@UAEDXZ" },
+    token_ctor = { "_ZN6CTokenC2EiPKc", "_ZN6CTokenC1EiPKc", "??0CToken@@QEAA@HPEBD@Z", "??0CToken@@QAE@HPBD@Z" },
+    token_ctor_cstring = { "_ZN6CTokenC2EiRK7CString", "_ZN6CTokenC1EiRK7CString",
+        "??0CToken@@QEAA@HAEBVCString@@@Z", "??0CToken@@QAE@HABVCString@@@Z" },
+    cstring_ctor = { "_ZN7CStringC2EPKc", "_ZN7CStringC1EPKc", "??0CString@@QEAA@PEBD@Z", "??0CString@@QAE@PBD@Z" },
+    init_tokens = { "_ZN12CStaticLexer10InitTokensEv", "_ZN6CLexer10InitTokensEv",
+        "?InitTokens@CStaticLexer@@AEAAXXZ", "?InitTokens@CStaticLexer@@AAEXXZ" },
+    static_lexer = { "_ZN12CStaticLexer17AccessStaticLexerEv", "_ZN12CStaticLexer14GetStaticLexerEv",
+        "?AccessStaticLexer@CStaticLexer@@SAAEAV1@XZ", "?AccessStaticLexer@CStaticLexer@@SAAAV1@XZ" },
+    read_until = { "_ZN10CTextLexer18ReadUntilCharacterEc", "_ZN6CLexer18ReadUntilCharacterEc",
+        "?ReadUntilCharacter@CTextLexer@@MEAA?AVCString@@D@Z", "?ReadUntilCharacter@CTextLexer@@MAE?AVCString@@D@Z" },
 }
+gamelexer.NAMES = NAMES
 
 -- The game's own functions that belong to its environment, not to reading script: replaced
 -- before anything runs (machine.lua: m:replace). 1.x profiles InitTokens, and the profiler asks
@@ -36,6 +52,7 @@ local NAMES = {
 local function nothing() end
 gamelexer.ENVIRONMENT = {
     ThreadIsMainThread = function() return 1 end,
+    _ThreadIsMainThread = function() return 1 end,
     _ZN13CProfileScopeC1EPKc = nothing,
     _ZN13CProfileScopeC2EPKc = nothing,
     _ZN13CProfileScopeD1Ev = nothing,
@@ -86,8 +103,21 @@ function gamelexer.new(m, options)
     if not f.token_ctor and f.token_ctor_cstring and f.cstring_ctor then
         f.token_ctor = false  -- CToken(int, CString const&) instead (1.x)
     end
+    if not f.lexer_ctor and f.lexer_base_ctor and f.text_lexer_vtable then
+        -- Windows: CTextLexer(CFile*, bool) is CLexer(CFile*, bool) and CTextLexer's vtable
+        f.lexer_ctor = false
+    end
+    -- a function is not missing when what stands in for it is there
+    local instead = { lexer_base_ctor = "lexer_ctor", text_lexer_vtable = "lexer_ctor", file_get = "unget",
+        lexer_ctor = "lexer_base_ctor", unget = "file_get" }
+    for i = #missing, 1, -1 do
+        local other = instead[missing[i]]
+        if other and f[other] then
+            table.remove(missing, i)
+        end
+    end
     for _, need in ipairs({ "gettok", "lexer_ctor", "file_ctor" }) do
-        if not f[need] then
+        if f[need] == nil then
             error("gamelexer: " .. need .. " not found in " .. tostring(m.image.path) ..
                 " (missing: " .. table.concat(missing, ", ") .. ")")
         end
@@ -108,8 +138,14 @@ function gamelexer.new(m, options)
         -- InitTokens is a method of the static lexer (a function-local static) where there is one
         m:call(f.init_tokens, f.static_lexer and m:call(f.static_lexer) or 0)
         gl.tokens_initialized = true
+    elseif options.init_tokens ~= false and f.static_lexer and m.windows then
+        -- x86-64 Windows: InitTokens is inlined in the static lexer's constructor, which
+        -- AccessStaticLexer runs the first time
+        m:call(f.static_lexer)
+        gl.tokens_initialized = true
     end
     gl:probe_token()
+    gl:probe_lexer()
     gl:probe_file()
     gl:probe_quoted()
     return gl
@@ -248,12 +284,35 @@ function Lexer:token_text(token, cstring)
     return m:cstring(p)
 end
 
+-- where the lexer keeps its current token, when there is no CLexer::Tok to ask: the token whose
+-- text is the word GetTok just read
+function Lexer:probe_lexer()
+    if self.f.tok then
+        return
+    end
+    local m = self.m
+    local s = self:open("oracleprobe")
+    m:call(self.f.gettok, s.lexer)
+    local L = self.token_layout
+    for o = 0, 0x100 - m.word, m.word do
+        local ok, text = pcall(self.token_text, self, s.lexer + o)
+        if ok and text == "oracleprobe" and m:i32(s.lexer + o + L.id) ~= 0 then
+            self.token_offset = o
+            return
+        end
+    end
+    error("gamelexer: the lexer's token was not found")
+end
+
 -- where CFile keeps its line, last byte and put-back flag: CFile::UnGet on a block of line feeds
 -- sets the flag (a byte 0x0a -> 0x01) and lowers the line (0x0a0a0a0a -> 0x0a0a0a09); then, on a
 -- block of zeros, the byte that UnGet reads as the last byte is the one that makes it lower the line
 function Lexer:probe_file()
     local m = self.m
     if not self.f.unget then
+        if self.f.file_get then
+            return self:probe_file_get()
+        end
         return
     end
     local size = 0x60
@@ -290,6 +349,56 @@ function Lexer:probe_file()
     m:free(a)
 end
 
+-- the same found with CMemoryFile::Get where UnGet is inlined (Windows): a file over "\nab\n"
+-- read twice; the line is the word that goes 1, 1, 2 (Get counts the line feed read before), the
+-- last byte the byte that goes 0, 10, 97; the put-back flag is the byte that, set to 1, makes the
+-- next Get give the last byte again (and is cleared by it)
+function Lexer:probe_file_get()
+    local m = self.m
+    local span = 0x100
+    local function file()
+        local buf = m:string("\nab\n")
+        local f = m:alloc(self.object_size)
+        m:call(self.f.file_ctor, f, buf, 4, self.file_type, 0, 0)
+        return f
+    end
+    local f = file()
+    local s0 = m:read(f, span)
+    local g1 = m:call(self.f.file_get, f) % 256
+    local s1 = m:read(f, span)
+    local g2 = m:call(self.f.file_get, f) % 256
+    local s2 = m:read(f, span)
+    local layout = {}
+    if g1 ~= 10 or g2 ~= 97 then
+        error(string.format("gamelexer: CMemoryFile::Get read %d, %d from \"\\nab\\n\"", g1, g2))
+    end
+    for o = 0, span - 4, 4 do
+        if not layout.line and u32(s0, o) == 1 and u32(s1, o) == 1 and u32(s2, o) == 2 then
+            layout.line = o
+        end
+    end
+    for o = 0, span - 1 do
+        if not layout.last and s0:byte(o + 1) == 0 and s1:byte(o + 1) == 10 and s2:byte(o + 1) == 97 then
+            layout.last = o
+        end
+    end
+    for o = 0, span - 1 do
+        local busy = (layout.line and o >= layout.line and o < layout.line + 4) or o == layout.last
+        if not busy and s0:byte(o + 1) == 0 and s1:byte(o + 1) == 0 and s2:byte(o + 1) == 0 then
+            local g = file()
+            m:call(self.f.file_get, g)
+            m:call(self.f.file_get, g)
+            m:set_u8(g + o, 1)
+            local ok, again = pcall(m.call, m, self.f.file_get, g)
+            if ok and again % 256 == 97 and m:u8(g + o) == 0 then
+                layout.unget = o
+                break
+            end
+        end
+    end
+    self.file_layout = layout
+end
+
 -- the quoted flag: the byte of the token that GetTok sets for "x" and not for y
 function Lexer:probe_quoted()
     local q = self:snapshot('"x"')
@@ -318,8 +427,17 @@ function Lexer:open(text)
     local file = m:alloc(self.object_size)
     m:call(self.f.file_ctor, file, buf, #text, self.file_type, 0, 0)
     local lexer = m:alloc(self.object_size)
-    m:call(self.f.lexer_ctor, lexer, file, self.lexer_flag)
+    if self.f.lexer_ctor then
+        m:call(self.f.lexer_ctor, lexer, file, self.lexer_flag)
+    else
+        -- the inlined CTextLexer(CFile*, bool) of the Windows builds
+        m:call(self.f.lexer_base_ctor, lexer, file, self.lexer_flag)
+        m:set_ptr(lexer, self.f.text_lexer_vtable)
+    end
     local token = self.f.tok and m:call(self.f.tok, lexer) or nil
+    if not token and self.token_offset then
+        token = lexer + self.token_offset
+    end
     return { buf = buf, file = file, lexer = lexer, token = token }
 end
 

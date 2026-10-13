@@ -11,7 +11,7 @@
 local here = arg[0]:match("^(.*)[/\\]tools[/\\][^/\\]*$") or "."
 package.path = here .. "/?.lua;" .. here .. "/?/init.lua;" .. package.path
 
-local elf = require("oracle.elf")
+local loader = require("oracle.image")  -- an ELF or a PE executable
 local machine = require("oracle.machine")
 local gamelexer = require("oracle.gamelexer")
 local cases = require("oracle.cases")
@@ -25,7 +25,7 @@ local function fail(message)
     os.exit(1)
 end
 
-local ok, image = pcall(elf.load, exe)
+local ok, image = pcall(loader.load, exe)
 if not ok then fail(image) end
 local m
 ok, m = pcall(machine.new, image)
