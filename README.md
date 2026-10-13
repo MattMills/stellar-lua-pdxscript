@@ -38,7 +38,7 @@ Install: copy `pdxscript.lua` anywhere on `package.path`, or `luarocks make` (th
 this directory).
 
 ```
-luajit tests/test_pdxscript.lua                     # 191 targeted tests (any Lua 5.1 to 5.4 too)
+luajit tests/test_pdxscript.lua                     # 209 targeted tests (any Lua 5.1 to 5.4 too)
 luajit tools/parse_all.lua "<Stellaris dir>"        # every script file; exit code 0 = no error
 luajit tools/parse_all.lua "<Stellaris dir>" primary
 cd tools/docs_mod && luajit make_docs_mod.lua "<docs dir>" "<Stellaris dir>" "<out dir>"
@@ -55,6 +55,29 @@ the round trip (write, parse again, compare).
 link, modifier and localisation command once, where the game accepts it, with a manifest of the
 file and line of each: a corpus for checking a reader against what the game compiled. See
 [tools/docs_mod/README.md](tools/docs_mod/README.md).
+
+## Every version
+
+`pdxscript.lua` is the fast tree of how 4.5.2 is written. The game's builds from 1.0.0 to 4.5.2
+read script differently in places, and the other modules read it the way a given version does,
+each checked against that version's own code run in an emulator ([oracle/](oracle/README.md)):
+
+| | |
+|---|---|
+| `pdxlexer.lua` | the game's tokenizer (`CTextLexer::GetTok`) with a profile per version: `pdxlexer.profile("2.8.1")`; the same tokens, field for field, as every build measured |
+| `pdxreader.lua` | the game's statement reader (`CPersistent::Read`, `CReader::ReadSimpleStatement`): keys, operators, values, scripted variables, the reader's messages, and the places where the game does what the text did not mean (`tree.bugs`); the same as every build measured, on the reader cases and on random text |
+| `pdxmath.lua` | the game's inline math (`@[ ... ]`): the same text, value and messages as each version's evaluator |
+| `pdxast.lua` | the full syntax tree: lossless (printing it gives the text back), typed values (numbers, dates, scope chains, variables, math expressions, parameters), positions, the version's reading as diagnostics; `pdxast.tree` is pdxscript's tree |
+| `oracle/` | the game's own lexer, reader and start-up, of any build, run from Lua in an emulator, and the tools that compare builds with each other and with these modules |
+
+```
+luajit tests/test_pdxlexer.lua
+luajit tests/test_pdxast.lua
+luajit tools/ast_check.lua "<Stellaris dir>" [version] [--semantic]   # every file: printed back, the same tree
+```
+
+Every vanilla corpus archived (70 GOG versions, 2.1.4.4 to 3.10.4, and 4.5.2) parses with 0 errors
+in pdxscript, and prints back byte for byte from pdxast.
 
 ## The tree
 
