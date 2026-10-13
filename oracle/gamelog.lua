@@ -50,6 +50,9 @@ end
 -- version has it, and the layouts differ: an old ABI std::string, a C++11 one, 4.x's own with the
 -- characters at +0x10)
 local function cstring_text(m, cs)
+    if m.windows then
+        return gamelog.msvc_string(m, cs)
+    end
     local ok, s = pcall(function()
         local get = m:has("_ZNK7CString11GetTCharPtrEv")
         return m:cstring(get and m:call(get, cs) or m:ptr(cs), 4096)
@@ -140,9 +143,89 @@ function gamelog.install_imports(L)
     end
 end
 
+-- The Windows builds: the game's own CLogStream (an MSVC std::ostringstream) runs as it is, and
+-- writes its message, when it is destroyed, to the logger CLogger::AccessInstance gives: the
+-- virtual Log(int level, CString const& file, int line, CString const& message) of the loggers,
+-- replaced as on Linux. Where no logger is set (CLogger::_pInstance), a CNullLogger is put there
+-- (an object with its vtable). A CString is an MSVC std::string (4.x: with an allocator before
+-- it): its characters inline while short, else behind a pointer, then the size and the capacity;
+-- where, is found by making two with the game's CString(char const*) (GetTCharPtr is inlined in
+-- most Windows builds).
+local function probe_cstring(m)
+    local ctor = m:has("??0CString@@QEAA@PEBD@Z") or m:has("??0CString@@QAE@PBD@Z")
+    if not ctor then return nil end
+    local w = m.word
+    local short, long = "ab", string.rep("L", 40) .. "probe"
+    local a, b = m:alloc(0x100), m:alloc(0x100)
+    m:call(ctor, a, m:string(short))
+    m:call(ctor, b, m:string(long))
+    local layout = {}
+    for o = 0, 0x60 - w, w do
+        if not layout.size and m:ptr(a + o) == #short and m:ptr(b + o) == #long then
+            layout.size = o
+        end
+    end
+    for o = 0, 0x60 - w, w do
+        if not layout.data then
+            local ok, s = pcall(m.cstring, m, m:ptr(b + o), #long + 1)
+            if ok and s == long and m:cstring(a + o, 8) == short then
+                layout.data = o
+            end
+        end
+    end
+    if layout.size then
+        layout.capacity = layout.size + w
+    end
+    if layout.size and layout.data then
+        return layout
+    end
+end
+
+function gamelog.msvc_string(m, s)
+    local L = m.cstring_layout
+    if not L then return "<CString>" end
+    local ok, text = pcall(function()
+        local size = m:ptr(s + L.size)
+        local cap = m:ptr(s + L.capacity)
+        if size > 1e6 then return "<CString>" end
+        local p = cap >= 16 and m:ptr(s + L.data) or s + L.data
+        return size > 0 and m:read(p, size) or ""
+    end)
+    return ok and text or "<CString>"
+end
+
+local MSVC_LOGGERS = {}
+for _, class in ipairs({ "CNullLogger", "CFileLogger", "CFilterLogger" }) do
+    MSVC_LOGGERS[#MSVC_LOGGERS + 1] = "?Log@" .. class .. "@@UEAAXHAEBVCString@@H0@Z"
+    MSVC_LOGGERS[#MSVC_LOGGERS + 1] = "?Log@" .. class .. "@@UAEXHABVCString@@H0@Z"
+end
+
+local function install_msvc(m)
+    m.cstring_layout = probe_cstring(m)
+    local n = 0
+    for _, name in ipairs(MSVC_LOGGERS) do
+        if m:replace_symbol(name, logger_log) then
+            n = n + 1
+        end
+    end
+    local null_vt = m:has("??_7CNullLogger@@6B@")
+    local instance = m:has("?_pInstance@CLogger@@0V?$unique_ptr@VCLogger@@U?$default_delete@VCLogger@@@std@@@std@@A") or
+        m:has("?_pInstance@CLogger@@0V?$auto_ptr@VCLogger@@@std@@A")
+    if null_vt and instance and m:ptr(instance) == 0 then
+        local logger = m:alloc(0x400)
+        m:set_ptr(logger, null_vt)
+        m:set_ptr(instance, logger)
+        m.logger = logger
+    end
+    return n
+end
+
 -- gamelog.install(m): the game's logging functions replaced on the machine
 function gamelog.install(m)
     m.log = m.log or {}
+    if m.windows then
+        return install_msvc(m)
+    end
     local n = 0
     for name, f in pairs(GAME) do
         if m:replace_symbol(name, f) then

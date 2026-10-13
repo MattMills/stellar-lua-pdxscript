@@ -9,7 +9,7 @@
 local here = arg[0]:match("^(.*)[/\\]tools[/\\][^/\\]*$") or "."
 package.path = here .. "/?.lua;" .. here .. "/?/init.lua;" .. package.path
 
-local elf = require("oracle.elf")
+local loader = require("oracle.image")  -- an ELF or a PE executable
 local machine = require("oracle.machine")
 local gamelexer = require("oracle.gamelexer")
 
@@ -28,7 +28,7 @@ else
 end
 
 local t0 = os.clock()
-local image = elf.load(exe)
+local image = loader.load(exe)
 local t1 = os.clock()
 local m = machine.new(image)
 local gl = gamelexer.new(m)

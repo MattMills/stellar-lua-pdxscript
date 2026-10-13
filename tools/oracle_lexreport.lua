@@ -21,11 +21,20 @@ local FIXED = { [0] = true, [1] = true, [2] = true, [3] = true, [4] = true, [5] 
     [8] = true, [9] = true, [12] = true, [15] = true, [19] = true, [467] = true, [468] = true,
     [971] = true, [972] = true, [1062] = true, [1063] = true }
 
+-- a result file is v<version>_<anything>.tsv; a Windows build's is v<version>_W_<store>...: its
+-- label is w<version> (the version as its directory names it, 2.2.4-bed463fd)
 local function version_key(name)
     local v = name:match("^v([%d%.]+)")
     local key = {}
-    for n in (v or "0"):gmatch("%d+") do key[#key + 1] = tonumber(n) end
-    return key, v or name
+    for n in (v or "0"):gmatch("%d+") do
+        key[#key + 1] = tonumber(n)
+    end
+    local label = v or name
+    local win = name:match("^v([^_]+)_W_")
+    if win then
+        label = "w" .. win
+    end
+    return key, label
 end
 
 local function before(a, b)

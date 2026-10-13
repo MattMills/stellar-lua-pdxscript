@@ -70,7 +70,7 @@ uc.REG = {
     r8 = 106, r9 = 107, r10 = 108, r11 = 109, r12 = 110, r13 = 111, r14 = 112, r15 = 113,
     eax = 19, ebx = 21, ecx = 22, edx = 24, esi = 29, edi = 23, ebp = 20, esp = 30, eip = 26,
     eflags = 25, fs_base = 250, gs_base = 251, fs = 32, gs = 33, cs = 11, ss = 49, ds = 17,
-    es = 28, gdtr = 243, xmm0 = 122, xmm1 = 123, st0 = 114, mxcsr = 249,
+    es = 28, gdtr = 243, xmm0 = 122, xmm1 = 123, xmm2 = 124, xmm3 = 125, st0 = 114, mxcsr = 249,
 }
 
 local lib
@@ -270,7 +270,8 @@ function Engine:flush()
 end
 
 -- 32-bit mode: a flat GDT whose entry `index` has base `base`, for %gs (glibc's thread pointer)
-function Engine:setup_gdt(gdt_address, tls_index, tls_base)
+-- or the segment register named by seg (Windows: "fs", the TEB)
+function Engine:setup_gdt(gdt_address, tls_index, tls_base, seg)
     local words = ffi.new("uint32_t[32]")  -- 16 descriptors of two words
     local function descriptor(i, base, limit, access, flags)
         words[2 * i] = bit.bor(bit.band(limit, 0xffff), bit.lshift(bit.band(base, 0xffff), 16))
@@ -287,7 +288,7 @@ function Engine:setup_gdt(gdt_address, tls_index, tls_base)
     local mmr = ffi.new("uc_x86_mmr")
     mmr.base, mmr.limit = gdt_address, 16 * 8 - 1
     self:set_reg_raw("gdtr", mmr)
-    self:set_reg("gs", tls_index * 8 + 3)
+    self:set_reg(seg or "gs", tls_index * 8 + 3)
     self:set_reg("ds", 2 * 8 + 3)
     self:set_reg("es", 2 * 8 + 3)
     self:set_reg("ss", 3 * 8)
