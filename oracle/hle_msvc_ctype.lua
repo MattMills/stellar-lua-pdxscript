@@ -7,6 +7,7 @@
 --               is not the unit itself (unit:mapped)
 --   cp1252[b]   MultiByteToWideChar(1252) of a byte (the bytes 0x80..0x9f that are not U+0080..U+009F;
 --               0x81 0x8d 0x8f 0x90 0x9d map to themselves)
+-- Written by tools/measure_ctype.py.
 
 local RUNS = [[
 0:220 9:268 a:228 e:220 20:248 21:210 30:284 3a:210 41:381 47:301 5b:210 61:382 67:302 7b:210

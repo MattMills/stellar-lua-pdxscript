@@ -691,8 +691,8 @@ L._ZN3tbb8internal18cache_aligned_allocateEj = function(m) return m:alloc(m:arg(
 
 -- native imports: the hottest functions as x86 code that runs inside the emulator, with no Lua
 -- callback (building the static lexer's token table calls memcmp 28 million times). Assembled
--- with GNU as from the source below; same results as the Lua versions above (tolower and toupper
--- with glibc's -128..-2 -> c + 256).
+-- with GNU as from tools/native/*.s (tools/native/assemble.sh --check: the same bytes as here);
+-- same results as the Lua versions above (tolower and toupper with glibc's -128..-2 -> c + 256).
 --
 --   memcpy:  rep movsb                       memmove: backwards (std) when the ranges overlap
 --   memset:  rep stosb                       memcmp:  bytewise, returns the difference
