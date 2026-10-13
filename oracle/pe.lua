@@ -163,6 +163,28 @@ function pe.parse(data, path, options)
     end
 
     -- the TLS directory (virtual addresses)
+    -- base relocations: the RVAs of the absolute addresses in the image (not applied: the image is
+    -- mapped at its preferred base); kept for oracle/transfer.lua, which masks them
+    local rrva, rsize = dir(5)
+    if rrva ~= 0 and offset_of(rrva) then
+        local o = offset_of(rrva)
+        local stop = o + rsize
+        local list = {}
+        while o + 8 <= stop do
+            local page, size = u32(o), u32(o + 4)
+            if size < 8 then break end
+            for k = 8, size - 2, 2 do
+                local e = u16(o + k)
+                local t = bit.rshift(e, 12)
+                if t == 3 or t == 10 then
+                    list[#list + 1] = page + bit.band(e, 0xfff)
+                end
+            end
+            o = o + size
+        end
+        image.base_relocs = list
+    end
+
     local trva = dir(9)
     if trva ~= 0 then
         local o = offset_of(trva)
@@ -339,6 +361,15 @@ function Image:convention(rva)
 end
 
 function Image:find(pattern)
+    -- (symbols carried over from a reference, oracle/transfer.lua: the reference's names that match,
+    -- found here first)
+    if self.transfer_reference then
+        for name in pairs(self.transfer_reference.symbols) do
+            if name:find(pattern) and not self.symbols[name] then
+                self:symbol(name)
+            end
+        end
+    end
     local out = {}
     for name, s in pairs(self.symbols) do
         if name:find(pattern) then
