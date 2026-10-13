@@ -196,8 +196,11 @@ function Reader:probe_reader()
         local reader = mm.bits == 64 and tonumber(mm.engine:reg("rdi")) or mm:u32(mm:sp() + 4)
         self.variables = self.variables or {}
         local name = self:current(reader)
+        -- the place: the file's read position (CMemoryFile::GetPosition, nested), else the lexer
         local lexer = mm:ptr(reader + self.reader_lexer)
-        local at = (name and name.text or "?") .. "@" .. tostring(mm:ptr(lexer + self.word))
+        local file = mm:ptr(lexer + self.word)
+        local place = self.gl.f.pos and mm:call(self.gl.f.pos, file) or lexer
+        local at = (name and name.text or "?") .. "@" .. tostring(place)
         if at ~= self.last_variable_at then
             self.variables[#self.variables + 1] = name and name.text or "?"
             self.last_variable_at = at
