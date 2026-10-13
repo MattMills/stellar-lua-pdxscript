@@ -178,17 +178,31 @@ end
 -- Windows: the statically linked C runtime initialized as WinMainCRTStartup does before anything
 -- else (__security_init_cookie, then __scrt_initialize_crt: the processor's features, vcruntime's
 -- and the UCRT's state: its heap, locks, per-thread data, the encoded pointers of its Windows API
--- thunks, stdio, the locale). Without it the UCRT decodes pointers that were never encoded.
+-- thunks, stdio, the locale), then the C initializers (__xi_a to __xi_z: the command line, the
+-- environment, on i386 the functions of the thread-safe statics). Without it the runtime decodes
+-- pointers that were never encoded. The C++ initializers (the game's globals) are not run.
 function Machine:crt_init()
     local u = self.bits == 32 and "_" or ""
     local results = {}
+    local function run(name, address, ...)
+        local ok, r = pcall(self.call, self, address, ...)
+        results[#results + 1] = { name = name, ok = ok, result = ok and r or nil, error = not ok and r or nil }
+    end
     for _, step in ipairs({ { "__security_init_cookie" }, { "__scrt_initialize_crt", 1 } }) do
         local a = self:has(u .. step[1])
         if a then
-            local ok, r = pcall(self.call, self, a, step[2])
-            results[#results + 1] = { name = step[1], ok = ok, result = ok and r or nil, error = not ok and r or nil }
+            run(step[1], a, step[2])
         else
             results[#results + 1] = { name = step[1], ok = false, error = "not found" }
+        end
+    end
+    local a, z = self:has(u .. "__xi_a"), self:has(u .. "__xi_z")
+    if a and z then
+        for p = a, z - self.word, self.word do
+            local fn = self:ptr(p)
+            if fn ~= 0 then
+                run(self:where(fn), fn)
+            end
         end
     end
     self.crt_init_results = results
