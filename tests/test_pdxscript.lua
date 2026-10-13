@@ -282,9 +282,8 @@ end
 do
     eq(parse_error("a = {\n\tb = = c\n}"), "t.txt:2:6: expected a value after '='", "two operators")
     eq(parse_error("a = {\n\tb = \"open\n}\n"), "t.txt:2:6: the string is not closed (no '\"')", "unclosed string")
-    eq(parse_error("x = 1\n= 2"), "t.txt:2:1: '=' with no key before it", "operator without key")
-    eq(parse_error("a = b ]"), "t.txt:1:7: ']' with no '[[NAME]' to close", "stray ]")
-    eq(parse_error("a = [b]"), "t.txt:1:5: '[' that does not start '[[NAME]' or '@['", "lone [")
+    eq(parse_error("e = {\n\t[[P]\n\t\tx = [y\n\t]\n}"), "t.txt:3:7: '[' inside a parameter block that does not start '[[NAME]' or '@['",
+        "lone [ in a parameter block")
     eq(parse_error("a = { b ! c }"), "t.txt:1:9: '!' that is not part of '!=' or '[[!'", "lone !")
     eq(parse_error("a = @[ 1 + 2"), "t.txt:1:5: inline math is not closed (no ']')", "unclosed math")
     eq(parse_error("a =\n"), "t.txt:2:1: the file ends after '=' (no value)", "no value at the end")
@@ -320,6 +319,26 @@ do
     w = t.warnings[1] or {}
     eq(w.kind, "extra_close", "extra close kind")
     eq(w.line, 2, "extra close line")
+
+    -- outside parameter blocks [ and ] are bytes of words (2.8's special projects:
+    -- `log = [fromfrom.GetName]`)
+    t = parse("a = [from.GetName]\nb = x]y\nc = [d] e = f")
+    eq(show(t), "a=[from.GetName] b=x]y c=[d] e=f", "brackets in words")
+    eq(#t.warnings, 3, "bracket words warned")
+    eq(t.warnings[1] and t.warnings[1].kind, "bracket_word", "bracket word kind")
+    t = parse("e = {\n\t[[P]\n\t\tx = $P$]\n}")
+    eq(show(t), "e={[[P]x=$P$]}", "] after a word still closes a parameter block")
+
+    -- an operator where a key should be (2.2 to 2.5's name lists: `ion_cannon = { = { ... } }`)
+    -- is skipped; a } after it is read with it, as the game's reader does
+    t = parse("ion_cannon = { = { a b }\n}\nx = 1")
+    eq(show(t), "ion_cannon={{a b}} x=1", "stray operator skipped")
+    eq(t.warnings[1] and t.warnings[1].kind, "stray_operator", "stray operator kind")
+    t = parse("x = 1\n= 2")
+    eq(show(t), "x=1 2", "stray operator at the top")
+    t = parse("a = { = } b = c }\nd = e")
+    eq(show(t), "a={b=c} d=e", "stray operator: the } after it does not close")
+    eq(#t.warnings, 2, "both warned")
 end
 
 -- write: back to text, and the same tree again

@@ -17,8 +17,18 @@ for i = 2, #arg do
     if arg[i] == "--case" then only = arg[i + 1] end
 end
 
+-- an error without what differs between builds: addresses, offsets, the imports called last
+local function error_kind(e)
+    if e:find("^timed out") then
+        return "timed out"
+    end
+    return (e:gsub("; recent imports:.*$", ""):gsub("%(address [^)]*%)", ""):gsub("0x%x+ ", "")
+        :gsub("%+0x%x+", ""):gsub("  +", " "))
+end
+
 -- a token is [Q:]id:"text"
 local function normalize(s)
+    s = s:gsub("(error=)([^	]*)", function(k, e) return k .. error_kind(e) end)
     if raw then return s end
     return (s:gsub('(Q?:?)(%-?%d+):(")', function(q, id, quote)
         if q == "Q:" then return q .. id .. ":" .. quote end

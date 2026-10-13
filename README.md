@@ -139,11 +139,17 @@ not fit the rules above is an error.
 |---|---|---|---|
 | `missing_operator` | `key { ... }` where key is not a colour tag | `key = { ... }` | `common/named_colors/01_trait_colors.txt:65` (`trait_bg_active_glow {`); 54 in .gui/.gfx/.asset (`position {`, `spriteType {`, `rotation {0 0 0}`) |
 | `missing_close` | the file ends inside blocks | closed at the end | `gfx/models/effects/nomads.gfx`, `gfx/models/ui/nomads_frontend.gfx` |
-| `extra_close` | a `}` at the top level | skipped | none; accepted because it is the most common mistake in mods (that the game reads on after it is an assumption, not checked against the game) |
+| `extra_close` | a `}` at the top level | skipped | none; accepted because it is the most common mistake in mods (the game's reader reads on after it: `oracle/reader_cases.lua`, `end.extra_close`) |
+| `bracket_word` | `[` or `]` outside a parameter block | a byte of a word, as the game's lexer reads it | none; 2.8's `common/special_projects/00_projects.txt` (`log = [fromfrom.GetName]`, 9 times) |
+| `stray_operator` | an operator where a key should be | skipped; a `}` right after it does not close its block, the game's reader has read it | none; 2.2 to 2.5's `common/name_lists/HUMAN1_SC.txt` (`ion_cannon = { = {`) |
 
-Not tolerated (errors, none in vanilla): a lone `[` or `!`, a `]` outside a parameter block, an
-operator with no key or no value (`key = { = }`, `a = = b`), a `}` inside a parameter block, and
-an unclosed string, inline math or parameter block.
+Not tolerated (errors, none in vanilla of any version): a lone `!`, a `[` inside a parameter
+block that does not start one, an operator with no value (`a = = b`, `key = { b = }`), a `}`
+inside a parameter block, and an unclosed string, inline math or parameter block.
+
+Every vanilla corpus archived parses with 0 errors: the 70 GOG versions from 2.1.4.4 to 3.10.4
+(`common`, `events`, `map`, ... of each) and 4.5.2. The game's own readers, of every version, are
+in [oracle/README.md](oracle/README.md).
 
 Oddities that parse without a warning, because the syntax allows them:
 

@@ -138,6 +138,12 @@ function machine.new(image, options)
     return m
 end
 
+-- m:close(): the emulator and the process's memory freed at once (a machine holds hundreds of MB;
+-- the garbage collector would free it only later)
+function Machine:close()
+    self.engine:close()
+end
+
 function Machine:pc()
     return tonumber(self.engine:reg(self.bits == 64 and "rip" or "eip"))
 end
@@ -610,28 +616,46 @@ function Machine:has(name)
 end
 
 -- m:replace(address, fn [, name]): the game's function at address is replaced by fn, a Lua
--- function like an import's (oracle/hle.lua): its entry is patched with a jump to a stub. For what
--- belongs to the environment, not to what is observed (the profiler, the thread checks).
+-- function like an import's (oracle/hle.lua). For what belongs to the environment, not to what is
+-- observed (the profiler, the thread checks, the logger). The code is not changed: a hook on the
+-- function's first instruction runs fn and returns to the caller (a patched jump would overwrite
+-- the next function when this one is shorter than the jump).
 function Machine:replace(address, fn, name)
     name = name or ("<replaced " .. self:where(address) .. ">")
-    rawset(self.hle, name, fn)
-    local stub = self:stub(name)
-    local code
-    if self.bits == 64 then
-        -- jmp [rip + 0]; the stub's address
-        local lo, hi = stub % 2 ^ 32, math.floor(stub / 2 ^ 32)
-        code = string.char(0xff, 0x25, 0, 0, 0, 0) .. string.char(lo % 256, math.floor(lo / 256) % 256,
-            math.floor(lo / 65536) % 256, math.floor(lo / 16777216) % 256, hi % 256,
-            math.floor(hi / 256) % 256, math.floor(hi / 65536) % 256, math.floor(hi / 16777216) % 256)
-    else
-        local rel = (stub - (address + 5)) % 2 ^ 32
-        code = string.char(0xe9, rel % 256, math.floor(rel / 256) % 256, math.floor(rel / 65536) % 256,
-            math.floor(rel / 16777216) % 256)
+    -- one hook per address: two names of one function (a C1 and C2 constructor) are one replacement
+    self.replacements = self.replacements or {}
+    local first = self.replacements[address] == nil
+    self.replacements[address] = { fn = fn, name = name }
+    if first then
+        self.engine:hook("code", function()
+            local r = self.replacements[address]
+            self:run_replacement(r.name, r.fn)
+        end, address, address)
     end
-    self:write(address, code)
-    self.engine:flush()
     self.replaced = self.replaced or {}
     self.replaced[#self.replaced + 1] = name
+end
+
+function Machine:run_replacement(name, fn)
+    self.recent_n = self.recent_n + 1
+    self.recent[(self.recent_n - 1) % 16 + 1] = name
+    local ok, r = pcall(fn, self, name)
+    if not ok then
+        self.fault = self.fault or { kind = name .. " failed: " .. tostring(r), pc = self:ptr(self:sp()) }
+        self.engine:stop()
+        return
+    end
+    if r == "noreturn" then
+        return
+    end
+    if type(r) ~= "string" then
+        self:set_return(r)
+    end
+    -- return: pop the return address (moved by m:callee_pops, or pushed by m:redirect) into the pc
+    local sp = self:sp()
+    local ret = self:ptr(sp)
+    self.engine:set_reg(self.bits == 64 and "rsp" or "esp", sp + self.word)
+    self.engine:set_reg(self.bits == 64 and "rip" or "eip", ret)
 end
 
 -- m:replace_symbol(mangled, fn) -> true if the image has the symbol (and it was replaced)

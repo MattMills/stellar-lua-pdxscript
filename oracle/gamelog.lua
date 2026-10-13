@@ -46,11 +46,23 @@ local function signed32(v)
     return v >= 2 ^ 31 and v - 2 ^ 32 or v
 end
 
--- the text of a CString: its first word points at the characters in every version (an old ABI
--- std::string, a C++11 one, or 4.x's own)
+-- the text of a CString, through the game's own CString::GetTCharPtr() (a nested call; every
+-- version has it, and the layouts differ: an old ABI std::string, a C++11 one, 4.x's own with the
+-- characters at +0x10)
 local function cstring_text(m, cs)
-    local ok, s = pcall(function() return m:cstring(m:ptr(cs), 4096) end)
+    local ok, s = pcall(function()
+        local get = m:has("_ZNK7CString11GetTCharPtrEv")
+        return m:cstring(get and m:call(get, cs) or m:ptr(cs), 4096)
+    end)
     return ok and s or "<CString>"
+end
+
+-- a logger's Log(int level, CString const& file, int line, CString const& text): the messages that
+-- do not go through a CLogStream (the reader's errors)
+local function logger_log(m)
+    m.log = m.log or {}
+    m.log[#m.log + 1] = { level = signed32(m:arg(2)), file = cstring_text(m, m:arg(3)),
+        line = signed32(m:arg(4)), text = cstring_text(m, m:arg(5)) }
 end
 
 -- the game's own functions
@@ -75,6 +87,10 @@ local GAME = {
     _ZN10CLogStreamD2Ev = function(m) close(m, m:arg(1)) end,
 }
 GAME._ZN10CLogStreamC2ERKS_ = GAME._ZN10CLogStreamC1ERKS_
+-- the loggers: the null logger InitGame would make, the file logger, the filter
+GAME._ZN11CNullLogger3LogEiRK7CStringiS2_ = logger_log
+GAME._ZN11CFileLogger3LogEiRK7CStringiS2_ = logger_log
+GAME._ZN13CFilterLogger3LogEiRK7CStringiS2_ = logger_log
 -- CLogStream::operator<< (the C++11 ABI builds tag them [abi:cxx11]): returns the stream
 for _, tag in ipairs({ "", "B5cxx11" }) do
     GAME["_ZN10CLogStreamls" .. tag .. "EPKc"] = function(m) return append(m, m:arg(1), m:cstring(m:arg(2))) end

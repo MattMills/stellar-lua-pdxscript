@@ -108,6 +108,9 @@ function pdxscript.parse(text, name)
     -- the current token: its kind, text (word, string, math, operator, parameter name), line,
     -- position and the position its line starts at; tneg for `[[!NAME]`
     local tk, tv, tl, tp, tls, tneg
+    -- how many parameter blocks are open: outside them `[` and `]` are bytes of words, as they are
+    -- to the game's lexer (`log = [from.GetName]` in 2.8's special projects)
+    local params = 0
 
     -- an error at the current token (raised as a table, which parse returns as its message)
     local function fail(message)
@@ -116,6 +119,25 @@ function pdxscript.parse(text, name)
 
     local function warn(kind, message, l, p, ls)
         warnings[#warnings + 1] = { kind = kind, line = l, col = p - ls + 1, message = message }
+    end
+
+    -- a word that starts with `[` or `]` (outside parameter blocks), to a blank or a byte that
+    -- starts another token
+    local bracketed = false
+    local function word_with_brackets()
+        local e = pos + 1
+        while true do
+            local x = byte(s, e)
+            if IN_WORD[x] or x == 91 or x == 93 then
+                e = e + 1
+            else
+                break
+            end
+        end
+        tk, tv = WORD, sub(s, pos, e - 1)
+        pos = e
+        warn("bracket_word", "'" .. tv .. "' read as one word: outside a parameter block '[' and ']' are bytes of words",
+            tl, tp, tls)
     end
 
     local function lex()
@@ -174,11 +196,24 @@ function pdxscript.parse(text, name)
                 return
             end
             local e = pos + 1
-            while IN_WORD[byte(s, e)] do
-                e = e + 1
+            while true do
+                local x = byte(s, e)
+                if IN_WORD[x] then
+                    e = e + 1
+                elseif params == 0 and (x == 91 or x == 93) then
+                    e = e + 1
+                    bracketed = true
+                else
+                    break
+                end
             end
             tk, tv = WORD, sub(s, pos, e - 1)
             pos = e
+            if bracketed then
+                bracketed = false
+                warn("bracket_word", "'" .. tv .. "' read as one word: outside a parameter block '[' and ']' are bytes of words",
+                    tl, tp, tls)
+            end
             return
         end
 
@@ -236,12 +271,17 @@ function pdxscript.parse(text, name)
             pos = pos + 2
         elseif c == 91 then
             local _, e, negated, param = find(s, "^%[%[(!?)([^%]%s]+)%]", pos)
-            if e == nil then
-                fail("'[' that does not start '[[NAME]' or '@['")
+            if e then
+                tk, tv, tneg = PARAM, param, negated == "!"
+                pos = e + 1
+            elseif params == 0 then
+                word_with_brackets()
+            else
+                fail("'[' inside a parameter block that does not start '[[NAME]' or '@['")
             end
-            tk, tv, tneg = PARAM, param, negated == "!"
-            pos = e + 1
-        else -- 93
+        elseif params == 0 then -- 93
+            word_with_brackets()
+        else
             tk = PCLOSE
             pos = pos + 1
         end
@@ -334,6 +374,7 @@ function pdxscript.parse(text, name)
                 end
                 lex()
             elseif k == PARAM then
+                params = params + 1
                 local condition = { param = tv, negated = tneg or nil, line = tl }
                 count = count + 1
                 cur[count] = condition
@@ -346,11 +387,21 @@ function pdxscript.parse(text, name)
                     fail("']' with no '[[NAME]' to close")
                 end
                 cur.last = tl
+                params = params - 1
                 cur, count = stack[2 * depth - 1], stack[2 * depth]
                 depth = depth - 1
                 lex()
             elseif k == OP then
-                fail("'" .. tv .. "' with no key before it")
+                -- the game reads an operator where a key should be as a key, and takes the token
+                -- after it for its operator: the operator is skipped, and a `}` after it does not
+                -- close the block (the game's reader has read it)
+                local op = tv
+                warn("stray_operator", "'" .. op .. "' with no key before it, skipped", tl, tp, tls)
+                lex()
+                if tk == CLOSE then
+                    warn("stray_operator", "'}' after '" .. op .. "' read with it: the block stays open", tl, tp, tls)
+                    lex()
+                end
             else -- EOF
                 while depth > 0 do
                     if cur.param then

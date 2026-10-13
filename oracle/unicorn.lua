@@ -111,6 +111,18 @@ function uc.open(bits)
         u64 = ffi.new("uint64_t[1]") }, Engine)
 end
 
+-- engine:close(): the engine and its memory freed now (the callbacks with it)
+function Engine:close()
+    if self.handle then
+        lib.uc_close(ffi.gc(self.handle, nil))
+        self.handle = nil
+        for _, cb in ipairs(self.callbacks) do
+            cb:free()
+        end
+        self.callbacks = {}
+    end
+end
+
 function Engine:map(address, size, perms)
     check(lib.uc_mem_map(self.handle, address, size, perms or uc.PROT_ALL),
         string.format("map 0x%x +0x%x", tonumber(address), tonumber(size)))
