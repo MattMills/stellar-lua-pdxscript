@@ -26,13 +26,21 @@ local function fail(message)
     os.exit(1)
 end
 
-local ok, m = pcall(function() return machine.new(loader.load(exe)) end)
+-- a machine with the reader ready. After a case where the game's code failed the next case gets a
+-- new one: a read stopped half way can leave the game's globals in any state.
+local ok, image = pcall(loader.load, exe)
+if not ok then fail(image) end
+local function make()
+    local m = machine.new(image)
+    local gl = gamelexer.new(m)
+    local gr = gamereader.new(gl)
+    -- a case the game never finishes (it reads past the end of the text) stops after 5 seconds
+    m.timeout = 5
+    return m, gl, gr
+end
+local m, gl, gr
+ok, m, gl, gr = pcall(make)
 if not ok then fail(m) end
-local gl, gr
-ok, gl = pcall(gamelexer.new, m)
-if not ok then fail(gl) end
-ok, gr = pcall(gamereader.new, gl)
-if not ok then fail(gr) end
 out:write("#build\t", exe, "\t", gl:describe(), string.format("; reader key +0x%x op +0x%x value +0x%x",
     gr.layout.key, gr.layout.op, gr.layout.value), "\n")
 
@@ -62,6 +70,10 @@ end
 
 for _, case in ipairs(cases) do
     local tree = gr:read(case.text)
+    if tree.error then
+        m:close()
+        m, gl, gr = make()
+    end
     local line = case.name .. "\t" .. serialize(tree)
     if #tree.variables > 0 then
         line = line .. "\tvars=" .. table.concat(tree.variables, ",")

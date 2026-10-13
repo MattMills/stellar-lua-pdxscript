@@ -46,11 +46,26 @@ local function signed32(v)
     return v >= 2 ^ 31 and v - 2 ^ 32 or v
 end
 
--- the text of a CString: its first word points at the characters in every version (an old ABI
--- std::string, a C++11 one, or 4.x's own)
+-- the text of a CString, through the game's own CString::GetTCharPtr() (a nested call; every
+-- version has it, and the layouts differ: an old ABI std::string, a C++11 one, 4.x's own with the
+-- characters at +0x10)
 local function cstring_text(m, cs)
-    local ok, s = pcall(function() return m:cstring(m:ptr(cs), 4096) end)
+    if m.windows then
+        return gamelog.msvc_string(m, cs)
+    end
+    local ok, s = pcall(function()
+        local get = m:has("_ZNK7CString11GetTCharPtrEv")
+        return m:cstring(get and m:call(get, cs) or m:ptr(cs), 4096)
+    end)
     return ok and s or "<CString>"
+end
+
+-- a logger's Log(int level, CString const& file, int line, CString const& text): the messages that
+-- do not go through a CLogStream (the reader's errors)
+local function logger_log(m)
+    m.log = m.log or {}
+    m.log[#m.log + 1] = { level = signed32(m:arg(2)), file = cstring_text(m, m:arg(3)),
+        line = signed32(m:arg(4)), text = cstring_text(m, m:arg(5)) }
 end
 
 -- the game's own functions
@@ -75,6 +90,10 @@ local GAME = {
     _ZN10CLogStreamD2Ev = function(m) close(m, m:arg(1)) end,
 }
 GAME._ZN10CLogStreamC2ERKS_ = GAME._ZN10CLogStreamC1ERKS_
+-- the loggers: the null logger InitGame would make, the file logger, the filter
+GAME._ZN11CNullLogger3LogEiRK7CStringiS2_ = logger_log
+GAME._ZN11CFileLogger3LogEiRK7CStringiS2_ = logger_log
+GAME._ZN13CFilterLogger3LogEiRK7CStringiS2_ = logger_log
 -- CLogStream::operator<< (the C++11 ABI builds tag them [abi:cxx11]): returns the stream
 for _, tag in ipairs({ "", "B5cxx11" }) do
     GAME["_ZN10CLogStreamls" .. tag .. "EPKc"] = function(m) return append(m, m:arg(1), m:cstring(m:arg(2))) end
@@ -126,11 +145,12 @@ end
 
 -- The Windows builds: the game's own CLogStream (an MSVC std::ostringstream) runs as it is, and
 -- writes its message, when it is destroyed, to the logger CLogger::AccessInstance gives: the
--- virtual CLogger::Log(int level, CString const& file, int line, CString const& message). The
--- logger installed here (CLogger::_pInstance) is an object with CNullLogger's vtable, its Log
--- replaced by Lua. A CString is an MSVC std::string (4.x: with an allocator before it): its
--- characters inline while short, else behind a pointer, then the size and the capacity. Where,
--- is found by making two with the game's CString(char const*).
+-- virtual Log(int level, CString const& file, int line, CString const& message) of the loggers,
+-- replaced as on Linux. Where no logger is set (CLogger::_pInstance), a CNullLogger is put there
+-- (an object with its vtable). A CString is an MSVC std::string (4.x: with an allocator before
+-- it): its characters inline while short, else behind a pointer, then the size and the capacity;
+-- where, is found by making two with the game's CString(char const*) (GetTCharPtr is inlined in
+-- most Windows builds).
 local function probe_cstring(m)
     local ctor = m:has("??0CString@@QEAA@PEBD@Z") or m:has("??0CString@@QAE@PBD@Z")
     if not ctor then return nil end
@@ -161,7 +181,7 @@ local function probe_cstring(m)
     end
 end
 
-local function msvc_string(m, s)
+function gamelog.msvc_string(m, s)
     local L = m.cstring_layout
     if not L then return "<CString>" end
     local ok, text = pcall(function()
@@ -173,50 +193,31 @@ local function msvc_string(m, s)
     end)
     return ok and text or "<CString>"
 end
-gamelog.msvc_string = msvc_string
+
+local MSVC_LOGGERS = {}
+for _, class in ipairs({ "CNullLogger", "CFileLogger", "CFilterLogger" }) do
+    MSVC_LOGGERS[#MSVC_LOGGERS + 1] = "?Log@" .. class .. "@@UEAAXHAEBVCString@@H0@Z"
+    MSVC_LOGGERS[#MSVC_LOGGERS + 1] = "?Log@" .. class .. "@@UAEXHABVCString@@H0@Z"
+end
 
 local function install_msvc(m)
-    local function find(names)
-        for _, n in ipairs(names) do
-            local a = m:has(n)
-            if a then return a, n end
-        end
-    end
-    local null_vt = find({ "??_7CNullLogger@@6B@" })
-    local instance = find({ "?_pInstance@CLogger@@0V?$unique_ptr@VCLogger@@U?$default_delete@VCLogger@@@std@@@std@@A",
-        "?_pInstance@CLogger@@0V?$auto_ptr@VCLogger@@@std@@A" })
-    if not (null_vt and instance) then
-        return 0
-    end
-    -- CNullLogger's Log: the slot of its vtable named so
-    local w, slots = m.word, 24
-    local vt = m:alloc(slots * w)
-    local log_slot, log_fn
-    for i = 0, slots - 1 do
-        local fn = m:ptr(null_vt + i * w)
-        m:set_ptr(vt + i * w, fn)
-        local name = m.image:name_at(fn - m.base)
-        if not log_slot and name and name:find("^%?Log@CNullLogger@@") then
-            log_slot, log_fn = i, fn
-        end
-    end
-    if not log_slot then
-        return 0
-    end
     m.cstring_layout = probe_cstring(m)
-    local stub_name = "<oracle CLogger::Log>"
-    rawset(m.hle, stub_name, function(mm)
-        local level, file, line, message = mm:arg(2), mm:arg(3), mm:arg(4), mm:arg(5)
-        mm.log = mm.log or {}
-        mm.log[#mm.log + 1] = { file = msvc_string(mm, file), line = signed32(line), level = signed32(level),
-            text = msvc_string(mm, message) }
-    end)
-    m:set_ptr(vt + log_slot * w, m:stub(stub_name, log_fn))
-    local logger = m:alloc(0x400)
-    m:set_ptr(logger, vt)
-    m:set_ptr(instance, logger)
-    m.logger = logger
-    return 1
+    local n = 0
+    for _, name in ipairs(MSVC_LOGGERS) do
+        if m:replace_symbol(name, logger_log) then
+            n = n + 1
+        end
+    end
+    local null_vt = m:has("??_7CNullLogger@@6B@")
+    local instance = m:has("?_pInstance@CLogger@@0V?$unique_ptr@VCLogger@@U?$default_delete@VCLogger@@@std@@@std@@A") or
+        m:has("?_pInstance@CLogger@@0V?$auto_ptr@VCLogger@@@std@@A")
+    if null_vt and instance and m:ptr(instance) == 0 then
+        local logger = m:alloc(0x400)
+        m:set_ptr(logger, null_vt)
+        m:set_ptr(instance, logger)
+        m.logger = logger
+    end
+    return n
 end
 
 -- gamelog.install(m): the game's logging functions replaced on the machine
