@@ -177,7 +177,8 @@ function Reader:register()
     local name = sub(lex.text, 2)
     self.variables[#self.variables + 1] = lex.text
     if self.profile.variables == "v1" then
-        -- 1.x: CReader::RegisterVariable
+        -- 1.x: CReader::RegisterVariable; the name is in the list once its '=' is read, before
+        -- its value (so `@x = "@x"` finds x taken, and `@x }` registers nothing)
         if self.locals[name] then
             self:log("Variable name " .. name .. " is already taken. ")
             return
@@ -185,6 +186,7 @@ function Reader:register()
         if lex:next() == 0 or lex.type ~= 1 then
             return
         end
+        self.locals[name] = { id = 0, text = "" }
         if lex:next() == 0 then
             return
         end
