@@ -216,6 +216,36 @@ function Image:name_at(address)
     return off == 0 and s.name or string.format("%s+0x%x", s.name, off)
 end
 
+-- image:object_at(address) -> symbol, offset: the defined symbol (data object or function) whose
+-- bytes [value, value + size) hold the address exactly, or nil (unlike name_at, no guessing past
+-- the end of a symbol)
+function Image:object_at(address)
+    if not self.by_extent then
+        local list = {}
+        for _, s in pairs(self.symbols) do
+            if s.size > 0 and s.value ~= 0 and (s.type == STT_OBJECT or s.type == STT_FUNC) then
+                list[#list + 1] = s
+            end
+        end
+        table.sort(list, function(a, b) return a.value < b.value end)
+        self.by_extent = list
+    end
+    local list = self.by_extent
+    local lo, hi = 1, #list
+    while lo <= hi do
+        local mid = math.floor((lo + hi) / 2)
+        local s = list[mid]
+        if address < s.value then
+            hi = mid - 1
+        elseif address >= s.value + s.size then
+            lo = mid + 1
+        else
+            return s, address - s.value
+        end
+    end
+    return nil
+end
+
 elf.STT_OBJECT, elf.STT_FUNC = STT_OBJECT, STT_FUNC
 
 return elf

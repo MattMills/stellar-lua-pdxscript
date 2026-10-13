@@ -505,12 +505,21 @@ function Machine:redirect(fn)
 end
 
 -- m:call(address, ...) -> the integer return value: calls a function of the game with integer or
--- pointer arguments (SysV x86-64, or cdecl on i386 where `this` is the first argument)
+-- pointer arguments (SysV x86-64, or cdecl on i386 where `this` is the first argument). It may be
+-- called from inside a hook or an import (a nested emulation): the registers are kept around it,
+-- and its stack is below the one in use.
 function Machine:call(address, ...)
     local e = self.engine
     local args = { ... }
     local L = self.layout
-    local sp = L.stack_top - 0x10000
+    local depth = self.depth or 0
+    local saved, sp
+    if depth > 0 then
+        saved = e:save()
+        sp = self:sp() - 0x400
+    else
+        sp = L.stack_top - 0x10000
+    end
     if self.bits == 64 then
         local extra = math.max(#args - 6, 0)
         sp = sp - 8 * extra
@@ -543,7 +552,24 @@ function Machine:call(address, ...)
     end
     self.fault = nil
     self.calls = self.calls + 1
-    local err = e:start(address, self.exit)
+    self.depth = depth + 1
+    -- a call from Lua has a time limit (m.timeout, seconds): the game's code can loop forever on
+    -- text it never expected (ReadUntilCharacter reads past the end of the file)
+    local err = e:start(address, self.exit, 0, depth == 0 and (self.timeout or 30) * 1e6 or 0)
+    self.depth = depth
+    local stopped = self.stop_reason
+    self.stop_reason = nil
+    if not err and not stopped and self:pc() ~= self.exit then
+        -- stopped before returning, by no fault and no m:stop: the time limit (Unicorn's timer
+        -- stops whichever emulation runs, a nested one too; the call that set it is then
+        -- stopped through the error this raises in the hook)
+        err = string.format("timed out after %ds", self.timeout or 30)
+    end
+    self.last_stop = stopped
+    local result = tonumber(e:reg(self.bits == 64 and "rax" or "eax"))
+    if saved then
+        e:restore(saved)
+    end
     if self.fault or err then
         local f = self.fault or { kind = err, pc = self:pc() }
         local recent = {}
@@ -559,10 +585,14 @@ function Machine:call(address, ...)
         self.fault = nil
         error(msg, 2)
     end
-    if self.bits == 64 then
-        return tonumber(e:reg("rax"))
-    end
-    return tonumber(e:reg("eax"))
+    return result
+end
+
+-- m:stop([reason]) from a hook: ends the current m:call, which then returns normally (its result is
+-- whatever is in rax / eax) with m.last_stop = reason
+function Machine:stop(reason)
+    self.stop_reason = reason or "stopped"
+    self.engine:stop()
 end
 
 -- m:sym(name) -> the address of a symbol of the image in the process (raises if absent)

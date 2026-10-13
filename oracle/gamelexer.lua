@@ -225,8 +225,8 @@ function Lexer:probe_token()
     end
 end
 
--- the text of the token at address
-function Lexer:token_text(token)
+-- the text of the token at address (as a C string with cstring, else to its size)
+function Lexer:token_text(token, cstring)
     local m, L = self.m, self.token_layout
     local p = 0
     if L.text_ptr then
@@ -241,7 +241,7 @@ function Lexer:token_text(token)
     if p == 0 and L.text_inline then
         p = token + L.text_inline
     end
-    local size = L.size and m:u32(token + L.size)
+    local size = not cstring and L.size and m:u32(token + L.size)
     if size and size > 0 and size < 2 ^ 24 then
         return m:read(p, size - 1), size
     end

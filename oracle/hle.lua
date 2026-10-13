@@ -480,61 +480,163 @@ L.fwrite = function(m)
 end
 L.fflush = function() return 0 end
 
--- printf: %d %i %u %x %X %s %c %p %% with l/ll/z/h flags, width and precision; %f/%g from
--- integer registers are not supported (they come in xmm registers)
-local function format(m, fmt, first)
-    local i = first
-    local function nextarg()
-        local v = m:arg(i)
+-- printf and its v- forms. The arguments come from a source: the call's own (integers in
+-- registers then on the stack, doubles in xmm registers on x86-64), or a va_list (x86-64: a
+-- { gp_offset, fp_offset, overflow_arg_area, reg_save_area } record; i386: a pointer into the
+-- stack).
+local function call_args(m, first)
+    local i, fp = first, 0
+    local src = {}
+    function src.int(wide)
+        local v
+        if m.bits == 32 and wide then
+            v = m:u32(m:sp() + 4 * i) + m:u32(m:sp() + 4 * (i + 1)) * 2 ^ 32
+            i = i + 2
+            return v
+        end
+        v = m:arg(i)
         i = i + 1
         return v
     end
-    return (fmt:gsub("%%([%-%+ #0]*)(%d*)%.?(%d*)([hlzjt]*)([diuxXscp%%fgeE])", function(flags, width, prec, len, conv)
+    function src.double()
+        if m.bits == 64 then
+            local x = ffi.new("double[2]")
+            m.engine:read_reg_raw("xmm" .. fp, x)
+            fp = fp + 1
+            return x[0]
+        end
+        local d = ffi.cast("const double *", m:read(m:sp() + 4 * i, 8))[0]
+        i = i + 2
+        return d
+    end
+    return src
+end
+
+local function va_args(m, va)
+    local src = {}
+    if m.bits == 64 then
+        function src.int()
+            local gp = m:u32(va)
+            local v
+            if gp < 48 then
+                v = m:u64(m:u64(va + 16) + gp)
+                m:set_u32(va, gp + 8)
+            else
+                local o = m:u64(va + 8)
+                v = m:u64(o)
+                m:set_u64(va + 8, o + 8)
+            end
+            return v
+        end
+        function src.double()
+            local fpo = m:u32(va + 4)
+            local at
+            if fpo < 176 then
+                at = m:u64(va + 16) + fpo
+                m:set_u32(va + 4, fpo + 16)
+            else
+                at = m:u64(va + 8)
+                m:set_u64(va + 8, at + 8)
+            end
+            return ffi.cast("const double *", m:read(at, 8))[0]
+        end
+    else
+        local p = va
+        function src.int(wide)
+            local v = m:u32(p)
+            if wide then
+                v = v + m:u32(p + 4) * 2 ^ 32
+                p = p + 4
+            end
+            p = p + 4
+            return v
+        end
+        function src.double()
+            local d = ffi.cast("const double *", m:read(p, 8))[0]
+            p = p + 8
+            return d
+        end
+    end
+    return src
+end
+
+-- %d %i %u %x %X %o %s %c %p %f %g %e %% with h, l, ll, z, j, t, width and precision
+local function format(m, fmt, src)
+    if type(src) == "number" then
+        src = call_args(m, src)
+    end
+    return (fmt:gsub("%%([%-%+ #0]*)(%*?%d*)%.?(%*?%d*)([hlLqzjt]*)([diuoxXscpfFgGeEaA%%])", function(flags, width, prec, len, conv)
         if conv == "%" then
             return "%"
         end
+        if width == "*" then width = tostring(src.int() % 2 ^ 32) end
+        if prec == "*" then prec = tostring(src.int() % 2 ^ 32) end
         local spec = "%" .. flags .. width .. (prec ~= "" and ("." .. prec) or "")
         if conv == "s" then
-            return string.format(spec .. "s", m:cstring(nextarg()))
+            return string.format(spec .. "s", m:cstring(src.int()))
         elseif conv == "c" then
-            return string.char(nextarg() % 256)
+            return string.char(src.int() % 256)
         elseif conv == "p" then
-            return string.format("0x%x", nextarg())
-        elseif conv == "f" or conv == "g" or conv == "e" or conv == "E" then
-            nextarg()
-            return "<float>"
+            return string.format("0x%x", src.int())
+        elseif conv:find("[fFgGeEaA]") then
+            local v = src.double()
+            if conv == "F" then conv = "f" end
+            if conv == "a" or conv == "A" then conv = "e" end
+            return string.format(spec .. conv, v)
         end
-        local v = nextarg()
-        local big = len:find("l") or len == "z" or len == "j" or len == "t"
-        if not big or m.bits == 32 and len ~= "ll" then
+        local wide = len == "ll" or len == "q" or len == "j" or (m.bits == 64 and (len == "l" or len == "z" or len == "t"))
+        local v = src.int(wide and m.bits == 32)
+        if not wide then
             v = v % 2 ^ 32
             if (conv == "d" or conv == "i") and v >= 2 ^ 31 then
                 v = v - 2 ^ 32
             end
+            if len == "h" then
+                v = v % 65536
+                if (conv == "d" or conv == "i") and v >= 32768 then v = v - 65536 end
+            elseif len == "hh" then
+                v = v % 256
+            end
         elseif (conv == "d" or conv == "i") and v >= 2 ^ 63 then
             v = v - 2 ^ 64
         end
-        if conv == "u" then conv = "d" end
-        if conv == "i" then conv = "d" end
+        if conv == "u" or conv == "i" then conv = "d" end
         return string.format(spec .. conv, v)
     end))
 end
-L.printf = function(m) return out(m, format(m, m:cstring(m:arg(1)), 2)) end
-L.sprintf = function(m)
-    local s = format(m, m:cstring(m:arg(2)), 3)
-    m:write(m:arg(1), s .. "\0", #s + 1)
-    return #s
-end
-L.snprintf = function(m)
-    local s = format(m, m:cstring(m:arg(3)), 4)
-    local n = m:arg(2)
+
+local function put(m, buf, n, s)
     if n > 0 then
         local w = s:sub(1, n - 1) .. "\0"
-        m:write(m:arg(1), w, #w)
+        m:write(buf, w, #w)
     end
     return #s
 end
+
+L.printf = function(m) return out(m, format(m, m:cstring(m:arg(1)), 2)) end
 L.fprintf = function(m) return out(m, format(m, m:cstring(m:arg(2)), 3)) end
+L.sprintf = function(m) local s = format(m, m:cstring(m:arg(2)), 3) return put(m, m:arg(1), #s + 1, s) end
+L.snprintf = function(m) return put(m, m:arg(1), m:arg(2), format(m, m:cstring(m:arg(3)), 4)) end
+L.__sprintf_chk = function(m) local s = format(m, m:cstring(m:arg(4)), 5) return put(m, m:arg(1), #s + 1, s) end
+L.__snprintf_chk = function(m) return put(m, m:arg(1), m:arg(2), format(m, m:cstring(m:arg(5)), 6)) end
+L.vprintf = function(m) return out(m, format(m, m:cstring(m:arg(1)), va_args(m, m:arg(2)))) end
+L.vfprintf = function(m) return out(m, format(m, m:cstring(m:arg(2)), va_args(m, m:arg(3)))) end
+L.vsprintf = function(m)
+    local s = format(m, m:cstring(m:arg(2)), va_args(m, m:arg(3)))
+    return put(m, m:arg(1), #s + 1, s)
+end
+L.vsnprintf = function(m)
+    return put(m, m:arg(1), m:arg(2), format(m, m:cstring(m:arg(3)), va_args(m, m:arg(4))))
+end
+L.__vsnprintf_chk = function(m)
+    return put(m, m:arg(1), m:arg(2), format(m, m:cstring(m:arg(5)), va_args(m, m:arg(6))))
+end
+L.__vsprintf_chk = function(m)
+    local s = format(m, m:cstring(m:arg(4)), va_args(m, m:arg(5)))
+    return put(m, m:arg(1), #s + 1, s)
+end
+L.__printf_chk = function(m) return out(m, format(m, m:cstring(m:arg(2)), 3)) end
+L.__fprintf_chk = function(m) return out(m, format(m, m:cstring(m:arg(3)), 4)) end
 
 hle.format = format
 hle.return_double = return_double

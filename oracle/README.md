@@ -11,6 +11,11 @@ So one driver works for every build, from 1.0.0 to 4.5.2.
 luajit tools/oracle_tokens.lua <stellaris executable> -e 'a = { b >= 1 }'   # one build, one text
 luajit tools/oracle_lexrun.lua <stellaris executable> out.tsv                # the cases, one build
 luajit tools/oracle_lexreport.lua <dir of .tsv> [--logic | --raw]            # the builds compared
+luajit tools/oracle_read.lua <stellaris executable> -e '@x = 2 a = @[ x * 3 ]'  # the statement reader
+luajit tools/oracle_readrun.lua <stellaris executable> out.tsv               # its cases, one build
+luajit tools/oracle_readreport.lua <dir of .tsv> [--raw]                     # the builds compared
+luajit tools/oracle_initrun.lua <stellaris executable> out.tsv               # InitGame and the databases
+luajit tools/oracle_initreport.lua <dir of .tsv> [--full]                    # the builds compared
 ```
 
 It needs LuaJIT and the Unicorn 2 emulator library (`PDXORACLE_UNICORN` = the path of
@@ -29,7 +34,10 @@ It needs LuaJIT and the Unicorn 2 emulator library (`PDXORACLE_UNICORN` = the pa
 | `hle_tree.lua` | libstdc++'s red-black tree (`std::map`) and hash table rehash policy |
 | `gamelog.lua` | the game's log (`CLogger::Log`, `CLogStream`) captured into `m.log` |
 | `gamelexer.lua` | `CTextLexer::GetTok` on any text: the lexer made by the game, its layout found by probing |
-| `cases.lua` | texts that probe the corners of a lexer |
+| `gamereader.lua` | the statement reader (`CReader` in `CPersistent::Read`) on any text: an object of the game's own class whose `ReadMember` is Lua, blocks read through the game's `CReader::Read(CPersistent&)` in nested emulation |
+| `gameinit.lua` | `CGameApplication::InitGame`'s steps and the databases (table, dependencies, order): [init_sequence.md](init_sequence.md) |
+| `report.lua` | the runners' results of all builds grouped by result, with version ranges |
+| `cases.lua`, `reader_cases.lua` | texts that probe the corners of a lexer, of a statement reader |
 
 Character classes are glibc's in the "C" locale, measured: `iswspace` of a signed char is HT, LF,
 VT, FF, CR and space in every locale, and `tolower` of -128..-2 is c + 256.

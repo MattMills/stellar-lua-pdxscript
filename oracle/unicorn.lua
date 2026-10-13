@@ -34,10 +34,17 @@ uc_err uc_mem_map(uc_engine *uc, uint64_t address, size_t size, uint32_t perms);
 uc_err uc_mem_unmap(uc_engine *uc, uint64_t address, size_t size);
 uc_err uc_mem_protect(uc_engine *uc, uint64_t address, size_t size, uint32_t perms);
 uc_err uc_ctl(uc_engine *uc, int control, ...);
+typedef struct uc_context uc_context;
+uc_err uc_context_alloc(uc_engine *uc, uc_context **context);
+uc_err uc_context_save(uc_engine *uc, uc_context *context);
+uc_err uc_context_restore(uc_engine *uc, uc_context *context);
+uc_err uc_context_free(uc_context *context);
 
 typedef void (*uc_cb_hookcode_t)(uc_engine *uc, uint64_t address, uint32_t size, void *user_data);
 typedef bool (*uc_cb_eventmem_t)(uc_engine *uc, int type, uint64_t address, int size,
                                  int64_t value, void *user_data);
+typedef void (*uc_cb_hookmem_t)(uc_engine *uc, int type, uint64_t address, int size,
+                                int64_t value, void *user_data);
 typedef void (*uc_cb_hookintr_t)(uc_engine *uc, uint32_t intno, void *user_data);
 typedef bool (*uc_cb_hookinsn_invalid_t)(uc_engine *uc, void *user_data);
 
@@ -97,6 +104,9 @@ function uc.open(bits)
     check(lib.uc_open(uc.ARCH_X86, bits == 32 and uc.MODE_32 or uc.MODE_64, p), "uc_open")
     -- the engine closes when the handle (this very cdata object) is collected
     local handle = ffi.gc(p[0], lib.uc_close)
+    -- a Haswell: the default CPU (qemu64) has no SSE4.1, which the game's builds use (roundss);
+    -- UC_CTL_WRITE(UC_CTL_CPU_MODEL, 1), UC_CPU_X86_HASWELL
+    check(lib.uc_ctl(handle, 0x44000007, ffi.cast("int", 19)), "uc_ctl cpu model")
     return setmetatable({ handle = handle, bits = bits, hooks = {}, callbacks = {},
         u64 = ffi.new("uint64_t[1]") }, Engine)
 end
@@ -150,10 +160,11 @@ function Engine:set_reg_raw(name, cdata)
     check(lib.uc_reg_write(self.handle, uc.REG[name], cdata), "reg_write " .. name)
 end
 
--- engine:start(begin, until [, count]) -> nil or the error message: runs until the address
--- `until` is reached, uc_emu_stop is called, or something fails
-function Engine:start(begin, stop, count)
-    local err = lib.uc_emu_start(self.handle, begin, stop, 0, count or 0)
+-- engine:start(begin, until [, count [, timeout_us]]) -> nil or the error message: runs until the
+-- address `until` is reached, uc_emu_stop is called, the count of instructions or the time runs
+-- out, or something fails
+function Engine:start(begin, stop, count, timeout_us)
+    local err = lib.uc_emu_start(self.handle, begin, stop, timeout_us or 0, count or 0)
     if err ~= 0 then
         return ffi.string(lib.uc_strerror(err))
     end
@@ -166,9 +177,10 @@ function Engine:stop()
     lib.uc_emu_stop(self.handle)
 end
 
--- engine:hook(kind, fn, begin, end) -> hook handle. kind: "code" (fn(address, size)), "mem"
--- (invalid accesses: fn(type, address, size, value) -> true to retry), "intr" (fn(intno)),
--- "insn_invalid" (fn() -> handled). The callbacks are kept from the garbage collector with the
+-- engine:hook(kind, fn, begin, end) -> hook handle. kind: "code" and "block" (fn(address, size)),
+-- "mem" (invalid accesses: fn(type, address, size, value) -> true to retry), "read" and "write"
+-- (valid accesses in [begin, end]: fn(address, size, value); value is what is written),
+-- "intr" (fn(intno)), "insn_invalid" (fn() -> handled). The callbacks are kept from the garbage collector with the
 -- engine. Emulation must not be started from JIT-compiled code (see machine.lua).
 function Engine:hook(kind, fn, begin, stop)
     load()
@@ -188,6 +200,11 @@ function Engine:hook(kind, fn, begin, stop)
             return fn(t, tonumber(address), size, tonumber(value)) and true or false
         end)
         htype = uc.HOOK_MEM_INVALID
+    elseif kind == "read" or kind == "write" then
+        cb = ffi.cast("uc_cb_hookmem_t", function(_, _, address, size, value)
+            fn(tonumber(address), size, tonumber(value))
+        end)
+        htype = kind == "read" and uc.HOOK_MEM_READ or uc.HOOK_MEM_WRITE
     elseif kind == "intr" then
         cb = ffi.cast("uc_cb_hookintr_t", function(_, intno)
             fn(intno)
@@ -206,11 +223,33 @@ function Engine:hook(kind, fn, begin, stop)
         ffi.cast("uint64_t", stop or 0)), "hook_add " .. kind)
     self.callbacks[#self.callbacks + 1] = cb
     self.hooks[#self.hooks + 1] = h[0]
+    if htype == uc.HOOK_CODE or htype == uc.HOOK_BLOCK then
+        -- code translated before the hook was added would not call it
+        lib.uc_ctl(self.handle, 0x4000000a)
+    end
     return h[0]
 end
 
 function Engine:unhook(h)
     lib.uc_hook_del(self.handle, h)
+end
+
+-- engine:save() -> context, engine:restore(context): the CPU's registers, around a nested
+-- emulation (a hook that runs more of the game's code)
+-- (the context is freed by restore: not left to the garbage collector, which could free it after
+-- the engine)
+function Engine:save()
+    local p = ffi.new("uc_context *[1]")
+    check(lib.uc_context_alloc(self.handle, p), "uc_context_alloc")
+    local ctx = p[0]
+    check(lib.uc_context_save(self.handle, ctx), "uc_context_save")
+    return ctx
+end
+
+function Engine:restore(ctx)
+    local err = lib.uc_context_restore(self.handle, ctx)
+    lib.uc_context_free(ctx)
+    check(err, "uc_context_restore")
 end
 
 -- engine:flush(): drop the translated code, after code was patched
