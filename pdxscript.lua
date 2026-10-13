@@ -9,18 +9,20 @@
 --
 -- The tree. A block is a Lua array of entries, in source order, duplicates kept:
 --
---   block      { [1..n] = entry, line = n, type = "hsv" | nil }
---                line is the line of the '{'; type is the tag of a typed block (`hsv { ... }`).
---                The tree itself is the block of the file, with line = 1, name = the name given
---                to parse, and warnings = a list (see below).
+--   block      { [1..n] = entry, line = n, last = n, type = "hsv" | nil }
+--                line is the line of the '{', last that of the '}' that closes it (or of the end
+--                of the file, if nothing does); type is the tag of a typed block (`hsv { ... }`).
+--                The tree itself is the block of the file, with line = 1, no last, name = the
+--                name given to parse, and warnings = a list (see below).
 --   entry      one of:
 --     statement  { key = token, op = "=", value = token | block, line = n }
 --                op is one of = == != < > <= >= ?= ; line is the line of the key.
 --     token      a bare value in a list block: `{ a b "c" 1 }`.
 --     block      a block in a list block: `{ { 1 2 } { 3 4 } }`, `{ rgb { 1 2 3 } }`.
---     condition  { param = "NAME", negated = true | nil, line = n, [1..n] = entry }
+--     condition  { param = "NAME", negated = true | nil, line = n, last = n, [1..n] = entry }
 --                `[[NAME] ... ]` (negated: `[[!NAME] ... ]`), the parameter blocks of scripted
---                triggers, effects and values; the entries are those inside it.
+--                triggers, effects and values; the entries are those inside it; last is the line
+--                of its ']'.
 --   An entry is a statement if it has .op, a token if it has .text, a condition if it has
 --   .param, and a block otherwise. Blocks may mix statements and bare values (vanilla does:
 --   `optimize_memory` in scripted effects, `prerequisites = { tech_a OR = { ... } }`).
@@ -326,6 +328,7 @@ function pdxscript.parse(text, name)
                 elseif cur.param then
                     fail(format("'}' inside [[%s%s] (line %d), which ']' closes", cur.negated and "!" or "", cur.param, cur.line))
                 else
+                    cur.last = tl
                     cur, count = stack[2 * depth - 1], stack[2 * depth]
                     depth = depth - 1
                 end
@@ -342,6 +345,7 @@ function pdxscript.parse(text, name)
                 if not cur.param then
                     fail("']' with no '[[NAME]' to close")
                 end
+                cur.last = tl
                 cur, count = stack[2 * depth - 1], stack[2 * depth]
                 depth = depth - 1
                 lex()
@@ -353,6 +357,7 @@ function pdxscript.parse(text, name)
                         fail(format("the file ends inside [[%s%s] (line %d)", cur.negated and "!" or "", cur.param, cur.line))
                     end
                     warn("missing_close", format("the file ends inside the block opened on line %d, closed there", cur.line), tl, tp, tls)
+                    cur.last = tl
                     cur = stack[2 * depth - 1]
                     depth = depth - 1
                 end

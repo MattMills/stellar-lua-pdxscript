@@ -103,8 +103,19 @@ do
     eq(t[2].value.line, 3, "block line")
     eq(t[2].value[1].key.line, 3, "nested key line")
     eq(t.line, 1, "tree line")
+    eq(t[2].value.last, 3, "block last line, '}' on the same line")
+    eq(t.last, nil, "the tree has no last line")
     eq(t.name, "t.txt", "tree name")
     eq(#t.warnings, 0, "no warnings")
+end
+do
+    -- last: the line of the '}' (or ']') that closes a block, or of the end of the file
+    local t = parse("a = {\n  b = 1\n\n}\nc = { d = {\n} }\n[[P]\n x = 1\n]\ne = {\n")
+    eq(t[1].value.last, 4, "last of a block closed lines later")
+    eq(t[2].value.last, 6, "last of the outer block")
+    eq(t[2].value[1].value.last, 6, "last of the inner block")
+    eq(t[3].last, 9, "last of a parameter block")
+    eq(t[4].value.last, 11, "last of a block the end of the file closes")
 end
 
 -- duplicates and order are kept
