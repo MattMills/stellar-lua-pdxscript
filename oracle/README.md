@@ -80,3 +80,19 @@ logic), 76 cases behave the same in every build, and 24 differ:
 
 Between 2.5.0 and 3.12.5 there is no Linux build with symbols. The Windows builds of those
 versions (with PDBs, or labelled by stellar-fnmatch) are the next to add.
+
+## pdxlexer: GetTok of every version, checked
+
+`pdxlexer.lua` is GetTok in plain Lua with a profile per version (`pdxlexer.profile("2.8.1")`):
+`comparisons`, `bang`, `nul`, `read_math`, `long_token`, from the table above. Checked with
+`tools/oracle_check_lexer.lua` against what each of the 50 builds' own lexers did, every field of
+every call (rc, id kind, quoted flag, text, line, position, last byte, put-back flag):
+
+| builds | cases that differ |
+|---|---|
+| 1.1.0 to 4.5.2 (45 builds) | 0 |
+| 1.0.0 to 1.0.3 (5 builds) | 4: the tokens longer than 256 bytes, which overrun the token's buffer in the game (a bug, not imitated; counted in `long_tokens`) |
+
+stellarstellaris-win's `lua/stellar/script/lexer.lua` (written for 4.5.2) is exact for 3.12.5 to
+4.5.2 and differs before, where the profiles change. A version in a gap between measured ranges
+gets the earlier profile, marked `uncertain` when a profile changes in that gap.
