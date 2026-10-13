@@ -1,0 +1,125 @@
+-- oracle/cases.lua : texts that probe the corners of a Paradox script lexer, for comparing the
+-- game's builds with each other and with our readers. Each case is { name, text }; the names are
+-- stable (results are keyed by them).
+
+local cases = {}
+
+local function add(name, text)
+    cases[#cases + 1] = { name = name, text = text }
+end
+
+-- operators
+add("op.eq", "a = b")
+add("op.eq_tight", "a=b")
+add("op.eqeq", "a == b")
+add("op.ge", "a >= b")
+add("op.ge_tight", "a>=b")
+add("op.le", "a <= b")
+add("op.gt", "a > b")
+add("op.lt", "a < b")
+add("op.ne", "a != b")
+add("op.bang", "a ! b")
+add("op.bang_word", "!a")
+add("op.qeq", "a ?= b")
+add("op.qeq_tight", "a?=b")
+add("op.q_word", "owner? = { }")
+add("op.arrow", "a => b")
+add("op.ge_split", "a > = b")
+add("op.lt_gt", "a <> b")
+add("op.ge_newline", "a >\n= b")
+add("op.lt_eof", "a <")
+add("op.bang_eof", "a !")
+add("op.eq_eof", "a =")
+
+-- punctuation the lexer may know
+add("punct.comma", "a,b , c")
+add("punct.parens", "f(a) ( b )")
+add("punct.semicolon", "a ; b\nc")
+add("punct.semicolon_tight", "a;b\nc")
+add("punct.brackets", "[[P] a ] [[!P] b ]")
+add("punct.single_bracket", "a [ b ] c")
+add("punct.braces", "{}{{}} a{b}c")
+add("punct.at_math", "@[ x + 1 ] @\\[ $P$ * 2 ]")
+add("punct.at_math_tight", "v = @[x+1]")
+add("punct.at_var", "@var = 5 a = @var")
+add("punct.param", "$P$ $P|default$ $P$_suffix")
+add("punct.percent", "100% 5%")
+add("punct.pipe", "value:x|P|5|")
+add("punct.colon_dot", "event_target:x.owner.capital_scope")
+add("punct.apostrophe", "Ni'amh")
+add("punct.slash", "jobs/soldiers_add")
+add("punct.backslash_word", "a\\b")
+add("punct.dollar_space", "$ P $")
+
+-- comments
+add("comment.line", "a # c\nb")
+add("comment.tight", "a#c\nb")
+add("comment.eof", "a # c")
+add("comment.only", "# only")
+add("comment.in_string", "a = \"x # y\"")
+add("comment.empty", "#\n#\na")
+add("comment.cr", "a # c\rb")
+
+-- quoted strings
+add("str.simple", "\"abc\"")
+add("str.empty", "\"\"")
+add("str.escaped_quote", "\"a\\\"b\"")
+add("str.escaped_backslash", "\"a\\\\b\"")
+add("str.escaped_n", "\"a\\nb\"")
+add("str.escaped_bracket", "\"\\[Root.GetName]\"")
+add("str.backslash_end", "\"a\\\\\" b")
+add("str.multiline", "\"a\nb\nc\" d")
+add("str.unterminated", "a = \"abc")
+add("str.adjacent", "\"a\"\"b\"")
+add("str.word_quote", "a\"b\"c")
+add("str.quote_word", "\"a\"b")
+add("str.braces_inside", "\"{ } = < >\"")
+add("str.long", "\"" .. string.rep("s", 300) .. "\" x")
+add("str.long_escapes", "\"" .. string.rep("ab\\\"", 100) .. "\" x")
+add("str.nul", "\"a\0b\" c")
+
+-- words and numbers
+add("num.int", "1 -1 +1 007")
+add("num.float", "1.5 -0.25 .5 5.")
+add("num.date", "2200.01.01 1.2.3.4")
+add("num.minus_word", "-a -")
+add("num.exp", "1e5 1E-5 0x10")
+add("num.word_digit", "a1 1a 1_000")
+add("word.case", "yes YES Yes no NOT not AND and OR or")
+add("word.keywords", "limit trigger owner if else_if else every_owned_planet random_list")
+add("word.long", string.rep("w", 300) .. " x")
+add("word.long_eof", string.rep("w", 300))
+add("word.nul", "a\0b c")
+add("word.eof", "a b")
+add("word.eof_space", "a b ")
+add("word.only", "x")
+add("word.single_letters", "a b c x y z A Z")
+
+-- bytes
+add("byte.utf8", "name = \"Ni\195\169\" n\195\169 = 1")
+add("byte.bom", "\239\187\191a = b")
+add("byte.bom_mid", "a \239\187\191b")
+add("byte.nbsp", "a\194\160b")
+add("byte.ff", "a \255 b")
+add("byte.high", "a\128b \200 \254")
+add("byte.ctrl_1c", "a\28b\29c\30d\31e")
+add("byte.ctrl_low", "a\1b\2c\127d")
+add("byte.vt_ff", "a\11b\12c")
+add("byte.crlf", "a = b\r\nc = d\r\n")
+add("byte.cr_only", "a\rb\rc")
+add("byte.tab", "a\t=\tb")
+add("byte.nul_alone", "a \0 b")
+add("byte.empty", "")
+add("byte.spaces", "   \n\n  ")
+
+-- structure as the lexer sees it
+add("struct.block", "a = { b = c d e }")
+add("struct.nested", "a = { b = { c = { d = 1 } } }")
+add("struct.typed", "color = hsv { 0.5 0.2 0.8 }")
+add("struct.list", "colors = { rgb { 1 2 3 } rgb { 4 5 6 } }")
+add("struct.missing_op", "key { a = b }")
+add("struct.extra_close", "a = b } c = d")
+add("struct.missing_close", "a = { b = c")
+add("struct.lines", "a = {\n\tb = c\n\n\td = e\n}\n")
+
+return cases

@@ -38,7 +38,7 @@ Install: copy `pdxscript.lua` anywhere on `package.path`, or `luarocks make` (th
 this directory).
 
 ```
-luajit tests/test_pdxscript.lua                     # 191 targeted tests (any Lua 5.1 to 5.4 too)
+luajit tests/test_pdxscript.lua                     # 209 targeted tests (any Lua 5.1 to 5.4 too)
 luajit tools/parse_all.lua "<Stellaris dir>"        # every script file; exit code 0 = no error
 luajit tools/parse_all.lua "<Stellaris dir>" primary
 cd tools/docs_mod && luajit make_docs_mod.lua "<docs dir>" "<Stellaris dir>" "<out dir>"
@@ -55,6 +55,29 @@ the round trip (write, parse again, compare).
 link, modifier and localisation command once, where the game accepts it, with a manifest of the
 file and line of each: a corpus for checking a reader against what the game compiled. See
 [tools/docs_mod/README.md](tools/docs_mod/README.md).
+
+## Every version
+
+`pdxscript.lua` is the fast tree of how 4.5.2 is written. The game's builds from 1.0.0 to 4.5.2
+read script differently in places, and the other modules read it the way a given version does,
+each checked against that version's own code run in an emulator ([oracle/](oracle/README.md)):
+
+| | |
+|---|---|
+| `pdxlexer.lua` | the game's tokenizer (`CTextLexer::GetTok`) with a profile per version: `pdxlexer.profile("2.8.1")`; the same tokens, field for field, as every build measured |
+| `pdxreader.lua` | the game's statement reader (`CPersistent::Read`, `CReader::ReadSimpleStatement`): keys, operators, values, scripted variables, the reader's messages, and the places where the game does what the text did not mean (`tree.bugs`); the same as every build measured, on the reader cases and on random text |
+| `pdxmath.lua` | the game's inline math (`@[ ... ]`): the same text, value and messages as each version's evaluator |
+| `pdxast.lua` | the full syntax tree: lossless (printing it gives the text back), typed values (numbers, dates, scope chains, variables, math expressions, parameters), positions, the version's reading as diagnostics; `pdxast.tree` is pdxscript's tree |
+| `oracle/` | the game's own lexer, reader and start-up, of any build, run from Lua in an emulator, and the tools that compare builds with each other and with these modules |
+
+```
+luajit tests/test_pdxlexer.lua
+luajit tests/test_pdxast.lua
+luajit tools/ast_check.lua "<Stellaris dir>" [version] [--semantic]   # every file: printed back, the same tree
+```
+
+Every vanilla corpus archived (70 GOG versions, 2.1.4.4 to 3.10.4, and 4.5.2) parses with 0 errors
+in pdxscript, and prints back byte for byte from pdxast.
 
 ## The tree
 
@@ -139,11 +162,17 @@ not fit the rules above is an error.
 |---|---|---|---|
 | `missing_operator` | `key { ... }` where key is not a colour tag | `key = { ... }` | `common/named_colors/01_trait_colors.txt:65` (`trait_bg_active_glow {`); 54 in .gui/.gfx/.asset (`position {`, `spriteType {`, `rotation {0 0 0}`) |
 | `missing_close` | the file ends inside blocks | closed at the end | `gfx/models/effects/nomads.gfx`, `gfx/models/ui/nomads_frontend.gfx` |
-| `extra_close` | a `}` at the top level | skipped | none; accepted because it is the most common mistake in mods (that the game reads on after it is an assumption, not checked against the game) |
+| `extra_close` | a `}` at the top level | skipped | none; accepted because it is the most common mistake in mods (the game's reader reads on after it: `oracle/reader_cases.lua`, `end.extra_close`) |
+| `bracket_word` | `[` or `]` outside a parameter block | a byte of a word, as the game's lexer reads it | none; 2.8's `common/special_projects/00_projects.txt` (`log = [fromfrom.GetName]`, 9 times) |
+| `stray_operator` | an operator where a key should be | skipped; a `}` right after it does not close its block, the game's reader has read it | none; 2.2 to 2.5's `common/name_lists/HUMAN1_SC.txt` (`ion_cannon = { = {`) |
 
-Not tolerated (errors, none in vanilla): a lone `[` or `!`, a `]` outside a parameter block, an
-operator with no key or no value (`key = { = }`, `a = = b`), a `}` inside a parameter block, and
-an unclosed string, inline math or parameter block.
+Not tolerated (errors, none in vanilla of any version): a lone `!`, a `[` inside a parameter
+block that does not start one, an operator with no value (`a = = b`, `key = { b = }`), a `}`
+inside a parameter block, and an unclosed string, inline math or parameter block.
+
+Every vanilla corpus archived parses with 0 errors: the 70 GOG versions from 2.1.4.4 to 3.10.4
+(`common`, `events`, `map`, ... of each) and 4.5.2. The game's own readers, of every version, are
+in [oracle/README.md](oracle/README.md).
 
 Oddities that parse without a warning, because the syntax allows them:
 
