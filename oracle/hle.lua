@@ -367,6 +367,119 @@ L.atof = function(m)
     return return_double(m, tonumber(s:match("^%s*([%+%-]?%d*%.?%d*[eE]?[%+%-]?%d*)") or "") or 0)
 end
 
+-- sscanf (glibc's __isoc99_sscanf, C99): the conversions the game uses (4.5.2: %d %i %u %llu %lld
+-- %lli %f %lf %hu, literal characters, %c, %s, %[set] with widths). Integer and pointer arguments are
+-- the destinations, from the third on; the result is the number of conversions assigned, or -1 when
+-- the input ends before the first one.
+local function scan_store(m, dest, kind, size, v)
+    if kind == "float" then
+        local b = ffi.new(size == 8 and "double[1]" or "float[1]", v)
+        m:write(dest, b, size)
+    else
+        local b = ffi.new("int64_t[1]", v)
+        m:write(dest, b, size)
+    end
+end
+local function sscanf(m)
+    local s = m:cstring(m:arg(1))
+    local fmt = m:cstring(m:arg(2))
+    local argi, assigned, i, f = 3, 0, 1, 1
+    local word = m.bits == 64 and 8 or 4
+    local function ws(c) return c == " " or c == "\t" or c == "\n" or c == "\r" or c == "\v" or c == "\f" end
+    while f <= #fmt do
+        local c = fmt:sub(f, f)
+        if ws(c) then
+            while ws(s:sub(i, i)) do i = i + 1 end
+            f = f + 1
+        elseif c ~= "%" then
+            if s:sub(i, i) ~= c then break end
+            i, f = i + 1, f + 1
+        elseif fmt:sub(f + 1, f + 1) == "%" then
+            if s:sub(i, i) ~= "%" then break end
+            i, f = i + 1, f + 2
+        else
+            f = f + 1
+            local suppress = false
+            if fmt:sub(f, f) == "*" then suppress, f = true, f + 1 end
+            local width = fmt:match("^%d+", f)
+            if width then f = f + #width; width = tonumber(width) end
+            local len = fmt:match("^hh", f) or fmt:match("^ll", f) or fmt:match("^[hljztL]", f) or ""
+            f = f + #len
+            local conv = fmt:sub(f, f)
+            f = f + 1
+            local set
+            if conv == "[" then
+                local close = fmt:find("]", f + (fmt:sub(f, f) == "]" and 1 or 0) + (fmt:sub(f, f + 1) == "^]" and 2 or 0), true)
+                set = fmt:sub(f, close - 1)
+                f = close + 1
+            end
+            if conv ~= "c" and conv ~= "[" and conv ~= "n" then
+                while ws(s:sub(i, i)) do i = i + 1 end
+            end
+            if i > #s and conv ~= "n" then
+                if assigned == 0 then return -1 end
+                break
+            end
+            local rest = width and s:sub(i, i + width - 1) or s:sub(i)
+            local text
+            if conv == "d" or conv == "u" then
+                text = rest:match("^[%+%-]?%d+")
+            elseif conv == "i" then
+                text = rest:match("^[%+%-]?0[xX]%x+") or rest:match("^[%+%-]?%d+")
+            elseif conv == "x" or conv == "X" then
+                text = rest:match("^[%+%-]?0[xX]%x+") or rest:match("^[%+%-]?%x+")
+            elseif conv == "f" or conv == "e" or conv == "g" or conv == "a" then
+                text = rest:match("^[%+%-]?%d*%.?%d*[eE][%+%-]?%d+") or rest:match("^[%+%-]?%d*%.?%d*")
+                if text and not text:find("%d") then text = nil end
+            elseif conv == "c" then
+                text = rest:sub(1, width or 1)
+                if #text < (width or 1) then text = nil end
+            elseif conv == "s" then
+                text = rest:match("^[^%s]+")
+            elseif conv == "[" then
+                local negate = set:sub(1, 1) == "^"
+                if negate then set = set:sub(2) end
+                local class = "[" .. (negate and "^" or "") .. set:gsub("[%%%]%[%^%-]", "%%%0") .. "]+"
+                -- a range a-z inside the set stays a range
+                class = class:gsub("(%w)%%%-(%w)", "%1-%2")
+                text = rest:match("^" .. class)
+            elseif conv == "n" then
+                if not suppress then scan_store(m, m:arg(argi), "int", 4, i - 1); argi = argi + 1 end
+                text = ""
+            end
+            if text == nil or (text == "" and conv ~= "n") then break end
+            if conv ~= "n" then
+                i = i + #text
+                if not suppress then
+                    local dest = m:arg(argi)
+                    argi = argi + 1
+                    if conv == "f" or conv == "e" or conv == "g" or conv == "a" then
+                        scan_store(m, dest, "float", (len == "l" or len == "L") and 8 or 4, tonumber(text) or 0)
+                    elseif conv == "c" then
+                        m:write(dest, text, #text)
+                    elseif conv == "s" or conv == "[" then
+                        m:write(dest, text .. "\0", #text + 1)
+                    else
+                        local base = (conv == "x" or conv == "X") and 16 or 10
+                        local sign, digits = text:match("^([%+%-]?)(.*)$")
+                        if conv == "i" or conv == "x" or conv == "X" then
+                            local hex = digits:match("^0[xX](%x+)$")
+                            if hex then digits, base = hex, 16 elseif conv == "i" and digits:match("^0%d") then base = 8 end
+                        end
+                        local v = tonumber(digits, base) or 0
+                        if sign == "-" then v = -v end
+                        local size = ({ hh = 1, h = 2, l = word, ll = 8, j = 8, z = word, t = word })[len] or 4
+                        scan_store(m, dest, "int", size, v)
+                    end
+                    assigned = assigned + 1
+                end
+            end
+        end
+    end
+    return assigned
+end
+L.__isoc99_sscanf, L.__isoc23_sscanf, L.sscanf = sscanf, sscanf, sscanf
+
 -- C++ runtime -------------------------------------------------------------------------------------------
 
 L.__cxa_guard_acquire = function(m)
@@ -680,6 +793,7 @@ local function return_float(m, v, double)
     return return_double(m, v)
 end
 for name, f in pairs({ fabs = math.abs, exp = math.exp, log = math.log, sin = math.sin, cos = math.cos,
+    log2 = function(x) return math.log(x) / math.log(2) end, log10 = function(x) return math.log10(x) end,
     round = function(x) return x >= 0 and math.floor(x + 0.5) or -math.floor(-x + 0.5) end }) do
     L[name] = function(m) return return_float(m, f(float_arg(m, true)), true) end
     L[name .. "f"] = function(m) return return_float(m, f(float_arg(m, false)), false) end

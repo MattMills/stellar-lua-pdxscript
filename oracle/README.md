@@ -16,6 +16,9 @@ luajit tools/oracle_readrun.lua <stellaris executable> out.tsv               # i
 luajit tools/oracle_readreport.lua <dir of .tsv> [--raw]                     # the builds compared
 luajit tools/oracle_initrun.lua <stellaris executable> out.tsv               # InitGame and the databases
 luajit tools/oracle_initreport.lua <dir of .tsv> [--full]                    # the builds compared
+luajit tools/oracle_abi.lua <stellaris executable> keys.tsv [k/n] [class]    # the keys every class reads
+luajit tools/oracle_abijson.lua abi.json keywords.tsv keys-*.tsv            # the script ABI, one file
+luajit tools/oracle_abidocs.lua abi.json triggers.log effects.log [--list]  # it against script_docs
 ```
 
 It needs LuaJIT and the Unicorn 2 emulator library (`PDXORACLE_UNICORN` = the path of
@@ -62,6 +65,7 @@ match a pattern, decoded), `tools/pe_vtable.lua`, `tools/pe_calls.lua`, `tools/o
 | `gamelog.lua` | the game's log (`CLogger::Log`, `CLogStream`) captured into `m.log` |
 | `gamelexer.lua` | `CTextLexer::GetTok` on any text: the lexer made by the game, its layout found by probing |
 | `gamereader.lua` | the statement reader (`CReader` in `CPersistent::Read`) on any text: an object of the game's own class whose `ReadMember` is Lua, blocks read through the game's `CReader::Read(CPersistent&)` in nested emulation |
+| `gameabi.lua` | the script ABI: every class's `ReadMember` run with every token of the static lexer, the paths grouped into its keys; the classes of the triggers and effects from their registries; RTTI bases |
 | `gameinit.lua` | `CGameApplication::InitGame`'s steps and the databases (table, dependencies, order): [init_sequence.md](init_sequence.md) |
 | `report.lua` | the runners' results of all builds grouped by result, with version ranges |
 | `cases.lua`, `reader_cases.lua` | texts that probe the corners of a lexer, of a statement reader |
@@ -191,3 +195,62 @@ What the corpora say about the gaps: 2.1.4.4 to 2.2.7 use `>=` and `<=` 4,777 ti
 lexer has one-token comparisons (measured from 2.3.0 only); 2.6 to 3.10 use `!=` 342 times, so
 `!` is an operator before 3.12.5 (measured from 3.12.5 only). The Windows builds of those versions
 will say exactly when.
+
+## The script ABI: every key every class reads
+
+The lexer's design makes the game's script interface enumerable. Every word the code compares
+against is a token of the static lexer (10,004 in 4.5.2, ids fixed at startup), and every class
+read from script reads its members in one function, `ReadMember(CReader&, int token[,
+EScopeType])`: a switch on the token's id, whose default hands the token on (to the base class's,
+which ends in `ReportUnexpected`). So running each class's own `ReadMember` once per token, on an
+object its own constructor made, with the game's `CReader` reading `<token> = 1`, walks every
+path of it, and the paths are the keys.
+
+```
+luajit tools/oracle_abi.lua <stellaris executable> keywords.tsv keywords   # triggers, effects: classes, bases
+for k in $(seq 1 22); do luajit tools/oracle_abi.lua <stellaris executable> keys-$k.tsv $k/22 & done; wait
+luajit tools/oracle_abijson.lua abi-4.5.2.json keywords.tsv keys-*.tsv
+```
+
+`gameabi.lua` first runs the 1,524 static initializers (they register the triggers and effects:
+`RegisterTriggerEntry`, `RegisterEffectEntry`) and creates the databases the initializers did not
+(200). Then, for each class with a `ReadMember` and a vtable, for each token, it records the
+basic blocks of `ReadMember` that ran, the first functions it entered, its result and whether it
+failed, the class of an object a member is read into (the vtable of `CReader::Read(CPersistent&)`'s
+argument) and the databases whose instance it read (a key into one, a block of triggers). Tokens
+with the same path are one group; the largest is the token the class does not read. A group is a
+key when its first call or its result differs from that one's.
+
+The triggers and effects are the keys of the registries, `std::map`s in the trigger and effect
+databases, with each entry's factory (`CTriggerEntry<C...>::Create`) naming its class, and
+`std::type_info`'s base chain giving its form (`CBoolTrigger` is `= yes/no`, `CIntTrigger` a
+comparison, `CAndTrigger` a block). `oracle_abijson.lua` folds what is not a key of its own: a
+class that reads 100 triggers or effects or more reads a block of statements (`"statements"`); a
+class that reads 1000 tokens or more with one reader reads any key with it (`"any_key"`: name
+lists, weighted string tables); one that reads 1000 or more with no call ignores a token it does
+not read (`"ignores_unknown"`: the settings). A keyword's keys are those of the `ReadMember`s
+that run for it: its class's (or its nearest base's), then each one a token it does not read goes
+to, which can be a helper's (`create_species` reads a species with `CSpecies::ReadMember`).
+
+### Results (Stellaris 4.5.2, Linux)
+
+The ABIs are kept in [stellar-abi-pdxscript](https://github.com/MattMills/stellar-abi-pdxscript) (`abi/v4.5.2.json`): 1,623 classes (491 made by their own constructor, the others an object of
+their vtable), 9,851 keys, 1,098 triggers and 1,080 effects: exactly those of the game's own
+documentation (`script_docs`). 22 shards on 24 cores take 25 minutes. A key's `reader` is the
+first function its value goes to (`CReader::Read(CFixedPoint&)`, `TokenToEnum<EScriptMaths>`,
+`NParserUtil::ReadKeyReference<CTechnologyDatabase>` ...), its `object` the class read for a
+block (`ai_weight` a `CMeanTimeToHappen`, `cost` a `CScriptableValue`).
+
+Against the documentation's usage examples (`tools/oracle_abidocs.lua`): of 2,137 keys documented
+for 834 keywords, the ABI has 2,064. Of the 73 it has not, about half are not keys: example
+values of a class that reads any key (`switch`'s `ethic_xenophile`, `random_list`'s `20`, flag
+names, resources, ship roles) and mistakes in the docs (`show_nofication`, `Count`, `e.g.mult`).
+The rest are the method's limits: a key whose path is the default's (it is read and the function
+returns as for a token it does not read: `trait_has_all_tags`, `default`), and keys read after one
+that failed in the emulator (`add_timeline_event`'s). 2,692 keys are read but their value failed:
+most are references into a database, which is empty in the emulator. The ABI has 723 keys the
+docs do not mention (`clone_leader`'s 24, `create_rebels`' 25, ...). For `CTechnology`, all 25
+keys vanilla's technologies use are found, with 10 more.
+
+Not yet: the value of a keyword that is not a block (its class's `Read`, for `always = yes`), the
+databases loaded so references read, and the other builds.
