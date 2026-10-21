@@ -22,8 +22,11 @@ while IFS=$'\t' read -r exe name _; do
     dir=$out/$name
     mkdir -p "$dir"
     start=$(date +%s)
-    luajit tools/oracle_abi.lua "$exe" "$dir/keywords.tsv" keywords > "$dir/log-keywords.txt" 2>&1
+    # (a file that ends in #done is kept: a stopped build goes on with the shards it had not done)
+    grep -q '^#done' "$dir/keywords.tsv" 2>/dev/null ||
+        luajit tools/oracle_abi.lua "$exe" "$dir/keywords.tsv" keywords > "$dir/log-keywords.txt" 2>&1
     for k in $(seq 1 "$shards"); do
+        grep -q '^#done' "$dir/keys-$k.tsv" 2>/dev/null && continue
         luajit tools/oracle_abi.lua "$exe" "$dir/keys-$k.tsv" "$k/$shards" > "$dir/log-$k.txt" 2>&1 &
     done
     wait

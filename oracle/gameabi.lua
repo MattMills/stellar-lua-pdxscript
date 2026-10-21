@@ -367,6 +367,8 @@ local function short(name)
     return (name or ""):gsub("^void ", "")
 end
 
+gameabi.TIMEOUT, gameabi.MAX_TIMEOUTS = 5, 3
+
 -- abi:trace(class) -> result (see the top of the file)
 function Abi:trace(class)
     local m, gr = self.m, self.gr
@@ -377,6 +379,11 @@ function Abi:trace(class)
     local groups, order = {}, {}
     local t0 = os.clock()
     local constructed
+    -- a token takes milliseconds; one that loops in the emulator stops after gameabi.TIMEOUT
+    -- seconds, and a class whose ReadMember loops on gameabi.MAX_TIMEOUTS tokens is given up (4.4.x's
+    -- CExpansionCountryModule loops on every token: 30 s each would be days)
+    local was_timeout, timeouts = m.timeout, 0
+    m.timeout = gameabi.TIMEOUT
     for _, tok in ipairs(self.tokens) do
         if tok.name then
             local s = gr:open(tok.name .. " = " .. self.value)
@@ -388,6 +395,14 @@ function Abi:trace(class)
             self.current = c
             local ok, rc = pcall(m.call, m, F, obj, s.reader, tok.id, 0, 0)
             self.current = nil
+            if not ok and tostring(rc):find("timed out", 1, true) then
+                timeouts = timeouts + 1
+                if timeouts >= gameabi.MAX_TIMEOUTS then
+                    m.timeout = was_timeout
+                    error(string.format("ReadMember timed out (%d s) on %d tokens, the last %s", gameabi.TIMEOUT,
+                        timeouts, tok.name))
+                end
+            end
             local list = {}
             for k in pairs(c.blocks) do list[#list + 1] = k end
             table.sort(list)
@@ -415,6 +430,7 @@ function Abi:trace(class)
             m:free(s.buf)
         end
     end
+    m.timeout = was_timeout
     table.sort(order, function(a, b) return #a.tokens > #b.tokens end)
     local default = order[1]
     local parent_call = default and default.entered[1]
