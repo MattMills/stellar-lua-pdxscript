@@ -199,9 +199,29 @@ end
 -- lists' registry helpers that make their tokens at run time), and the class of the object each
 -- makes (CTriggerDatabase::CreateTrigger(int), CEffectDatabase::CreateEffect(int)). The entries
 -- are a std::map<int, entry> in the database (4.5.2 [V]: the trigger database's header at +0x78,
--- the effect database's at +0x20; a node's left +0x10, right +0x18, key +0x20); the token's text
--- is CStaticLexer::GetString(id)'s (its text pointer at +0x10).
-gameabi.ENTRY_MAPS = { trigger = 0x78, effect = 0x20 }
+-- the effect database's at +0x20), found in each build (gameabi.entry_map): a header of
+-- libstdc++'s _Rb_tree (color, parent, left, right, then the count; a word each) whose root's
+-- parent is the header and whose leftmost and rightmost nodes' keys (+4 words) are token ids. The
+-- token's text is CStaticLexer::GetString(id)'s (its text pointer at +0x10, +8 on 32-bit).
+function gameabi.entry_map(m, db, tokens)
+    local w = m.word
+    local best, most
+    for o = 0, 0x400 - 5 * w, w do
+        local ok, n = pcall(function()
+            local h = db + o
+            local root = m:ptr(h + w)
+            if root == 0 or m:ptr(root + w) ~= h then return nil end
+            local left, right = m:ptr(h + 2 * w), m:ptr(h + 3 * w)
+            local count = m:ptr(h + 4 * w)
+            local lo, hi = m:i32(left + 4 * w), m:i32(right + 4 * w)
+            -- (ids past the static lexer's: tokens the registry helpers made at run time)
+            if count < 2 or count > 100000 or lo < 0 or hi >= tokens * 8 or lo > hi then return nil end
+            return count
+        end)
+        if ok and n and (not most or n > most) then best, most = db + o, n end
+    end
+    return best
+end
 function Abi:factories()
     local m, sym = self.m, self.sym
     local function find(name)
@@ -225,25 +245,32 @@ function Abi:factories()
         local db = g and m:ptr(m.base + g)
         local map = {}
         out[kind] = map
-        if fn and db and db ~= 0 then
+        local header = fn and db and db ~= 0 and gameabi.entry_map(m, db, #self.tokens)
+        if header then
             -- the registered ids: the map's nodes, in order
-            local ids = {}
-            local header = db + gameabi.ENTRY_MAPS[kind]
-            local stack, node = {}, m:ptr(header + m.word)
+            -- and each one's entry (the value, +5 words: CTriggerEntry<C...>, whose class names the
+            -- trigger's when the trigger cannot be made here)
+            local ids, entry_class = {}, {}
+            local w = m.word
+            local stack, node = {}, m:ptr(header + w)
             while node ~= 0 or #stack > 0 do
                 while node ~= 0 do
                     stack[#stack + 1] = node
-                    node = m:ptr(node + 0x10)
+                    node = m:ptr(node + 2 * w)
                 end
                 node = table.remove(stack)
-                ids[#ids + 1] = m:i32(node + 0x20)
-                node = m:ptr(node + 0x18)
+                local id = m:i32(node + 4 * w)
+                ids[#ids + 1] = id
+                local ok, vt = pcall(function() return m:ptr(m:ptr(node + 5 * w)) end)
+                local c = ok and sym.vtable_class[vt - m.base - 2 * w]
+                entry_class[id] = c and c:match("^C%a+Entry<(.*)>$")
+                node = m:ptr(node + 3 * w)
             end
             for _, id in ipairs(ids) do
                 if get_string and not out.names[id] then
                     local ok, t = pcall(m.call, m, m.base + get_string, id)
                     if ok and t ~= 0 then
-                        local ok2, text = pcall(m.cstring, m, m:ptr(t + 0x10))
+                        local ok2, text = pcall(m.cstring, m, m:ptr(t + 2 * m.word))
                         out.names[id] = ok2 and text or nil
                     end
                 end
@@ -252,11 +279,13 @@ function Abi:factories()
                     local vt = m:ptr(obj)
                     map[id] = sym.vtable_class[vt - m.base - 2 * m.word] or string.format("? vtable %x", vt - m.base)
                 else
-                    map[id] = "? " .. (ok and "nothing made" or tostring(obj):gsub("[\r\n\t]", " "):sub(1, 80))
+                    map[id] = entry_class[id]
+                        or "? " .. (ok and "nothing made" or tostring(obj):gsub("[\r\n\t]", " "):sub(1, 80))
                 end
             end
         else
-            out[kind .. "_error"] = string.format("function %s, instance %s", tostring(fn), tostring(db))
+            out[kind .. "_error"] = string.format("function %s, instance %s, entry map %s",
+                tostring(fn), tostring(db), tostring(header))
         end
     end
     return out

@@ -7,6 +7,7 @@
 --   "build": "...", "tokens": n,
 --   "triggers": { "<keyword>": { "id": n, "class": "C...", "bases": [ "C...", ... ],
 --                  "keys": [ "<key>", ... ], "statements": "triggers" | "effects" | null,
+--                  "statements_from": "C..." (the class whose ReadMember reads them),
 --                  "traced": false | null }, ... },
 --   "effects":  { ... the same ... },
 --   "classes":  { "<class>": { "parent": "C..." | null, "read_member": "0x...", "constructed": b,
@@ -198,7 +199,13 @@ for line in io.lines(kw_path) do
         for _, c in ipairs(chain) do
             if abi.classes[c] then
                 traced = true
-                entry.statements = entry.statements or abi.classes[c].statements
+                -- and the class whose ReadMember reads them: CEffect's and CTrigger's own make any
+                -- effect or trigger they are handed, so for an effect whose `statements_from` is
+                -- CEffect the block may not be one its class means (`set_owner`, a target, has it)
+                if abi.classes[c].statements and not entry.statements then
+                    entry.statements = abi.classes[c].statements
+                    entry.statements_from = c
+                end
                 for k in pairs(abi.classes[c].keys) do
                     if k ~= "__object" and not from[k] then
                         from[k] = c
