@@ -597,8 +597,16 @@ function Machine:cstring(address, max)
 end
 
 -- the heap: 16-byte aligned blocks with their size in the 16 bytes before them, free lists by size
+-- The largest block one allocation may take (m.max_alloc): a size read from garbage (a loop the
+-- game's code is lost in) would map heap until the host runs out, inside a hook, where the call's
+-- time limit cannot stop it (4.3.1's CBitmapFont::ReadMember: 6 GB in 80 minutes).
+Machine.max_alloc = 1024 * 1024 * 1024
+
 function Machine:alloc(n, align)
     n = math.max(n, 1)
+    if n > self.max_alloc then
+        error(string.format("allocation of %.0f bytes (more than m.max_alloc)", n))
+    end
     local size = n + (16 - n % 16) % 16
     align = align or 16
     if align <= 16 then
