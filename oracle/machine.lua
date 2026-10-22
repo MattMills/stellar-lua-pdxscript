@@ -352,11 +352,19 @@ function Machine:relocate()
         end
         return self:stub(r.name)
     end
+    -- a COPY relocation: the shared library's object copied into the executable, which reads it
+    -- there; the ones whose contents matter are written by hle.copy (1.x's tr1 __prime_list)
+    local function copy(r, at)
+        local f = self.hle.copy and r.name and self.hle.copy[(r.name:gsub("@.*", ""))]
+        if f then f(self, at) end
+    end
     for _, r in ipairs(image.relocs) do
         local at = base + r.offset
         if bits == 64 then
             local t = r.type
-            if t == R64.RELATIVE then
+            if t == R64.COPY then
+                copy(r, at)
+            elseif t == R64.RELATIVE then
                 self:set_u64(at, base + r.addend)
             elseif t == R64.JUMP_SLOT or t == R64.GLOB_DAT then
                 self:set_u64(at, target(r) + (t == R64.GLOB_DAT and r.addend or 0))
@@ -374,7 +382,9 @@ function Machine:relocate()
         else
             local t = r.type
             local a = r.addend or self:u32(at)
-            if t == R32.RELATIVE then
+            if t == R32.COPY then
+                copy(r, at)
+            elseif t == R32.RELATIVE then
                 self:set_u32(at, (base + a) % 2 ^ 32)
             elseif t == R32.JMP_SLOT or t == R32.GLOB_DAT then
                 self:set_u32(at, target(r))
@@ -587,8 +597,16 @@ function Machine:cstring(address, max)
 end
 
 -- the heap: 16-byte aligned blocks with their size in the 16 bytes before them, free lists by size
+-- The largest block one allocation may take (m.max_alloc): a size read from garbage (a loop the
+-- game's code is lost in) would map heap until the host runs out, inside a hook, where the call's
+-- time limit cannot stop it (4.3.1's CBitmapFont::ReadMember: 6 GB in 80 minutes).
+Machine.max_alloc = 1024 * 1024 * 1024
+
 function Machine:alloc(n, align)
     n = math.max(n, 1)
+    if n > self.max_alloc then
+        error(string.format("allocation of %.0f bytes (more than m.max_alloc)", n))
+    end
     local size = n + (16 - n % 16) % 16
     align = align or 16
     if align <= 16 then

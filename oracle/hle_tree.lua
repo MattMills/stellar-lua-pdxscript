@@ -316,7 +316,20 @@ local function policy_load(m, self)
     return require("ffi").cast("const float *", f)[0]
 end
 
+-- std::tr1::__detail::__prime_list, which 1.x's executables copy from libstdc++ (R_386_COPY) and
+-- search inline for a hash table's bucket count: _S_n_primes + 1 sorted entries (256 + 1 of 32
+-- bits; 304 + 1 of 64), these primes and then the largest prime of the width. Left zero, every
+-- table had 0 buckets (a division by zero in find).
+local function prime_list(m, at)
+    local n, top = m.bits == 32 and 257 or 305, 4294967291
+    for i = 1, n do
+        m:set_ptr(at + (i - 1) * m.word, PRIMES[i] or top)
+    end
+end
+
 function T.install(L)
+    L.copy = L.copy or {}
+    L.copy._ZNSt3tr18__detail12__prime_listE = prime_list
     L._ZSt29_Rb_tree_insert_and_rebalancebPSt18_Rb_tree_node_baseS0_RS_ = insert_and_rebalance
     L._ZSt28_Rb_tree_rebalance_for_erasePSt18_Rb_tree_node_baseRS_ = rebalance_for_erase
     L._ZSt18_Rb_tree_incrementPSt18_Rb_tree_node_base = function(m) return increment(node(m), m:arg(1)) end

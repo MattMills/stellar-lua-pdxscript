@@ -191,7 +191,23 @@ local E = {
     end },
 }
 
+-- std::tr1::hash<std::string>::operator()(std::string) const (gcc 4: _Fnv_hash, FNV-1a over the
+-- characters, 32-bit; 1.x's hash tables of CString). The string, a class with a copy constructor,
+-- is passed by reference to a copy. Without it every key hashed to 0 and the initializers' tables
+-- of thousands of names took minutes.
+local function tr1_hash(m)
+    local t = text(m, m:arg(2))
+    local h = 2166136261
+    for i = 1, #t do
+        h = require("bit").bxor(h, t:byte(i)) % 2 ^ 32
+        -- the product exceeds a double's 53 bits: split the prime (16777619 = 2^24 + 403)
+        h = (h * 403 + (h % 256) * 2 ^ 24) % 2 ^ 32
+    end
+    return h
+end
+
 function S.install(L)
+    L._ZNKSt3tr14hashISsEclESs = tr1_hash
     for _, e in ipairs(E) do
         local prefix, member, params, f = e[1], e[2], e[3], e[4]
         local p64 = params:gsub("j", "m")
