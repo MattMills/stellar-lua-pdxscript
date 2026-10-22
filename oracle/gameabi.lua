@@ -268,10 +268,18 @@ function Abi:factories()
             end
             for _, id in ipairs(ids) do
                 if get_string and not out.names[id] then
+                    -- the token's text: behind a pointer at +2 words in 4.3 on (the CString's
+                    -- allocator first), at +0 or +1 word before; the first that reads as a
+                    -- keyword (an empty or unreadable one is no name: the static table's is kept)
                     local ok, t = pcall(m.call, m, m.base + get_string, id)
                     if ok and t ~= 0 then
-                        local ok2, text = pcall(m.cstring, m, m:ptr(t + 2 * m.word))
-                        out.names[id] = ok2 and text or nil
+                        for _, off in ipairs({ 2 * m.word, 0, m.word, 3 * m.word }) do
+                            local ok2, text = pcall(function() return m:cstring(m:ptr(t + off), 256) end)
+                            if ok2 and text and text:match("^[%w_:%.@%-]+$") then
+                                out.names[id] = text
+                                break
+                            end
+                        end
                     end
                 end
                 local ok, obj = pcall(m.call, m, m.base + fn, db, id)
