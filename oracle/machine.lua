@@ -601,6 +601,9 @@ end
 -- game's code is lost in) would map heap until the host runs out, inside a hook, where the call's
 -- time limit cannot stop it (4.3.1's CBitmapFont::ReadMember: 6 GB in 80 minutes).
 Machine.max_alloc = 1024 * 1024 * 1024
+-- and the whole heap (m.max_heap): many allocations under that each in the same loop (a 2.3.1
+-- shard: 120 GB before the host's OOM killer took it)
+Machine.max_heap = 8 * 1024 * 1024 * 1024
 
 function Machine:alloc(n, align)
     n = math.max(n, 1)
@@ -622,6 +625,9 @@ function Machine:alloc(n, align)
         a = a + (align - a % align) % align
     end
     local top = a + size
+    if top - self.layout.heap > self.max_heap then
+        error(string.format("the heap would pass %.0f bytes (m.max_heap)", self.max_heap))
+    end
     while top > self.heap_mapped do
         self.engine:map(self.heap_mapped, self.layout.heap_chunk)
         self.heap_mapped = self.heap_mapped + self.layout.heap_chunk
