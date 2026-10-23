@@ -266,21 +266,34 @@ function Abi:factories()
                 entry_class[id] = c and c:match("^C%a+Entry<(.*)>$")
                 node = m:ptr(node + 3 * w)
             end
-            for _, id in ipairs(ids) do
-                if get_string and not out.names[id] then
-                    -- the token's text: behind a pointer at +2 words in 4.3 on (the CString's
-                    -- allocator first), at +0 or +1 word before; the first that reads as a
-                    -- keyword (an empty or unreadable one is no name: the static table's is kept)
-                    local ok, t = pcall(m.call, m, m.base + get_string, id)
-                    if ok and t ~= 0 then
-                        for _, off in ipairs({ 2 * m.word, 0, m.word, 3 * m.word }) do
-                            local ok2, text = pcall(function() return m:cstring(m:ptr(t + off), 256) end)
-                            if ok2 and text and text:match("^[%w_:%.@%-]+$") then
-                                out.names[id] = text
-                                break
-                            end
-                        end
+            -- the tokens' names: the static lexer's table's where it has them; the others (made at
+            -- run time by the registries) from CStaticLexer::GetString, whose text is behind a
+            -- pointer at +2 words in 4.3 on (the CString's allocator first) and elsewhere before:
+            -- the offset is the one at which GetString gives the static table's names back
+            local static = {}
+            for _, t in ipairs(self.tokens) do static[t.id] = t.name end
+            local function text_at(id, off)
+                local ok, t = pcall(m.call, m, m.base + get_string, id)
+                if not ok or t == 0 then return nil end
+                local ok2, text = pcall(function() return m:cstring(m:ptr(t + off), 256) end)
+                return ok2 and text or nil
+            end
+            if get_string and not self.name_offset then
+                local best, most = nil, 0
+                for _, off in ipairs({ 0, m.word, 2 * m.word, 3 * m.word }) do
+                    local n = 0
+                    for i = 1, math.min(#self.tokens, 200), 7 do
+                        local t = self.tokens[i]
+                        if t.name and text_at(t.id, off) == t.name then n = n + 1 end
                     end
+                    if n > most then best, most = off, n end
+                end
+                self.name_offset = best or false
+            end
+            for _, id in ipairs(ids) do
+                if not out.names[id] then
+                    local text = not static[id] and self.name_offset and text_at(id, self.name_offset)
+                    out.names[id] = static[id] or (text and text ~= "" and text or nil)
                 end
                 local ok, obj = pcall(m.call, m, m.base + fn, db, id)
                 if ok and obj ~= 0 then
